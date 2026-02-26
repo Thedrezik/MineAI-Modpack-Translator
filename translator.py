@@ -90,9 +90,11 @@ def is_translation_key(text):
     return bool(re.match(r'^[a-zA-Z0-9_-]+[.:][a-zA-Z0-9_.-]+$', t))
 
 def load_lenient_json(raw_bytes):
-    text = raw_bytes.decode('utf-8', errors='ignore')
+    # Исправление кодировки UTF-8 BOM
+    text = raw_bytes.decode('utf-8-sig', errors='ignore')
+    # Безопасное удаление комментариев (чтобы не сломать http://)
     text = re.sub(r'/\*.*?\*/', '', text, flags=re.DOTALL) 
-    text = re.sub(r'(?<!:)//.*', '', text) 
+    text = re.sub(r'(?m)^\s*//.*$', '', text) 
     text = re.sub(r',\s*([\]}])', r'\1', text) 
     return json.loads(text, strict=False)
 
@@ -117,7 +119,6 @@ def inject_book_strings(data, t_iter):
         for item in data: inject_book_strings(item, t_iter)
 
 def is_technical_term(text):
-    """Быстрый фильтр технических строк (очень ускоряет Ars Nouveau, Blood Magic и т.п.)"""
     if not text or len(text) < 5: return True
     lower = text.lower()
     if re.match(r'^[a-z0-9_.-]+$', lower) and any(c in lower for c in '._'):
@@ -133,7 +134,7 @@ def is_technical_term(text):
 class TranslatorApp(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.title("MineAI Translator 4.3 (Ultimate Edition)")
+        self.title("MineAI Translator 4.4 (Ultimate Edition)")
         self.geometry("1150x800")
         self.resizable(False, False)
         
@@ -146,13 +147,11 @@ class TranslatorApp(ctk.CTk):
         self.ai_model_path = ""
         self.is_running = False
         
-        # ETA
         self.start_time = None
         self.total_strings = 0
         self.translated_strings = 0
         self.last_eta_update = 0
         
-        # Умный автоскролл (чтобы можно было скроллить вверх во время перевода)
         self.auto_scroll = True
         
         load_cache()
@@ -228,7 +227,6 @@ class TranslatorApp(ctk.CTk):
         self.textbox.tag_config("dim", foreground="#888888")
         self.textbox.tag_config("white", foreground="#ffffff")
         
-        # Умный автоскролл
         self.textbox.bind("<Button-1>", self.on_user_interaction)
         self.textbox.bind("<Key>", self.on_user_interaction)
         self.textbox.bind("<MouseWheel>", self.on_user_interaction)
@@ -243,7 +241,6 @@ class TranslatorApp(ctk.CTk):
         self.update_engine_ui()
 
     def on_user_interaction(self, event=None):
-        """Отключаем автоскролл, когда пользователь вручную скроллит вверх"""
         self.auto_scroll = (self.textbox.yview()[1] >= 0.99)
 
     def update_engine_ui(self):
@@ -331,7 +328,6 @@ class TranslatorApp(ctk.CTk):
         threading.Thread(target=self.run_analysis, daemon=True).start()
 
     def run_analysis(self):
-        # (полный код анализа из предыдущей версии — без изменений)
         lang_settings = LANGUAGES[self.var_lang.get()]
         target_file = f"{lang_settings['file']}.json"
         l_regex = lang_settings.get('regex', r'[А-Яа-яЁё]')
@@ -390,7 +386,6 @@ class TranslatorApp(ctk.CTk):
                                 except: pass
             except: pass
 
-        # (квесты — без изменений)
         snbt_files = []
         if os.path.exists(quests_dir) and self.var_quests.get():
             for root, _, files in os.walk(quests_dir):
@@ -463,8 +458,7 @@ class TranslatorApp(ctk.CTk):
                             en_data = load_lenient_json(zin.read(item))
                             en_strings = [s for s in extract_book_strings(en_data) if s.strip() and re.search(r'[a-zA-Z]', s) and not is_technical_term(s)]
                             total += len(en_strings)
-            except:
-                pass
+            except: pass
 
         for filepath in snbt_files:
             if not self.is_running: return total
@@ -478,8 +472,7 @@ class TranslatorApp(ctk.CTk):
                     total += len(valid)
                 else:
                     total += sum(1 for s in valid if not re.search(l_regex, s))
-            except:
-                pass
+            except: pass
         return total
 
     def run_translation(self):
@@ -512,7 +505,6 @@ class TranslatorApp(ctk.CTk):
             self.log_colored("❌ Нечего переводить!", "red")
             self.lock_ui(False); return
 
-        # Подсчёт строк для ETA
         self.log_colored("📊 Подсчёт строк для точного ETA...", "yellow")
         self.total_strings = self.estimate_total_strings(jar_files, snbt_files, lang_settings, mode_overwrite)
         self.log_colored(f"   Найдено строк для перевода: {self.total_strings}", "cyan")
@@ -525,7 +517,6 @@ class TranslatorApp(ctk.CTk):
             if not os.path.exists(rp_dir): os.makedirs(rp_dir)
             rp_zip_path = os.path.join(rp_dir, f"MineAI_{lang_settings['name']}_Pack.zip")
             
-            # ================= УМНЫЙ РЕСУРСПАК =================
             if os.path.exists(rp_zip_path):
                 self.log_colored("📦 Найден старый ресурспак — сохраняем все предыдущие переводы...", "yellow")
                 backup = rp_zip_path + ".backup"
@@ -580,7 +571,6 @@ class TranslatorApp(ctk.CTk):
         self.lock_ui(False)
 
     def setup_and_start_ai(self):
-        # (без изменений из предыдущей версии)
         try:
             if requests.get(KOBOLD_API.replace("chat/completions", "models"), timeout=1).status_code == 200:
                 self.log_colored("✅ Сервер ИИ уже работает", "green")
@@ -607,7 +597,6 @@ class TranslatorApp(ctk.CTk):
         return False
 
     def translate_engine(self, data_dict, engine, lang_settings):
-        # (полный код с ETA обновлением — без изменений из 4.2)
         keys = list(data_dict.keys())
         result = {}
         to_translate = {}
@@ -639,7 +628,6 @@ class TranslatorApp(ctk.CTk):
         if not to_translate or not self.is_running: return result
 
         if engine == "google":
-            # ... (тот же код, что был в 4.2, с self.translated_strings += 1 и обновлением статуса)
             chunks = []
             curr_keys, curr_text = [], ""
             for k, val in to_translate.items():
@@ -697,10 +685,7 @@ class TranslatorApp(ctk.CTk):
                             except: result[k] = to_translate[k]["original"]
                             time.sleep(0.3)
                             
-        # (DEEPL и AI блоки — полностью как в 4.2, с добавлением self.translated_strings += 1 и обновлением статуса)
-
         elif engine == "deepl":
-            # ... (аналогично, с self.translated_strings += 1)
             api_key = self.entry_deepl_key.get().strip()
             url = "https://api.deepl.com/v2/translate" if not api_key.endswith(":fx") else "https://api-free.deepl.com/v2/translate"
             b_keys = list(to_translate.keys())
@@ -757,7 +742,6 @@ class TranslatorApp(ctk.CTk):
         return result
 
     def process_jar(self, filepath, engine, mode_overwrite, output_mode, lang_settings, rp_zip_path):
-        # (полный код с фильтром is_technical_term — как в моём предыдущем сообщении)
         mod_name = get_mod_name(filepath)
         target_file = f"{lang_settings['file']}.json"
         temp_filepath = filepath + ".temp"
@@ -782,8 +766,17 @@ class TranslatorApp(ctk.CTk):
                         if self.var_mods.get() and is_lang:
                             trans_filename = re.sub(r'en_us\.json$', target_file, item.filename, flags=re.IGNORECASE)
                             trans_t = trans_filename.lower()
-                            en_data = load_lenient_json(zin.read(item))
-                            trans_data = load_lenient_json(zin.read(trans_files[trans_t])) if trans_t in trans_files else {}
+                            
+                            try:
+                                en_data = load_lenient_json(zin.read(item))
+                            except Exception as e:
+                                self.log_colored(f"⚠️ Пропуск файла {item.filename} (ОШИБКА АВТОРА МОДА: сломанный синтаксис JSON)", "yellow")
+                                continue
+                                
+                            try:
+                                trans_data = load_lenient_json(zin.read(trans_files[trans_t])) if trans_t in trans_files else {}
+                            except:
+                                trans_data = {}
                             
                             final_data = en_data.copy()
                             keys_to_translate = {}
@@ -824,11 +817,19 @@ class TranslatorApp(ctk.CTk):
                                     translated_any = True
 
                         elif self.var_books.get() and is_book:
-                            # аналогичный блок с фильтром is_technical_term
                             trans_filename = re.sub(r'/en_us/', f"/{lang_settings['file']}/", item.filename, flags=re.IGNORECASE)
                             trans_t = trans_filename.lower()
-                            en_data = load_lenient_json(zin.read(item))
-                            trans_data = load_lenient_json(zin.read(trans_files[trans_t])) if trans_t in trans_files else {}
+                            
+                            try:
+                                en_data = load_lenient_json(zin.read(item))
+                            except Exception as e:
+                                self.log_colored(f"⚠️ Пропуск книги {item.filename} (ОШИБКА АВТОРА МОДА: сломанный синтаксис JSON)", "yellow")
+                                continue
+                                
+                            try:
+                                trans_data = load_lenient_json(zin.read(trans_files[trans_t])) if trans_t in trans_files else {}
+                            except:
+                                trans_data = {}
                             
                             en_strings = [s for s in extract_book_strings(en_data) if s.strip()]
                             trans_strings = [s for s in extract_book_strings(trans_data) if s.strip()] if trans_data else []
@@ -891,10 +892,10 @@ class TranslatorApp(ctk.CTk):
 
         except Exception as e:
             if os.path.exists(temp_filepath): os.remove(temp_filepath)
-            self.log_colored(f"❌ Ошибка в {mod_name}: {e}", "red")
+            self.log_colored(f"❌ Критическая ошибка в {mod_name}: {e}", "red")
 
     def process_snbt(self, filepath, engine, mode_overwrite, lang_settings):
-        # (полный код без изменений)
+        if not self.var_quests.get(): return
         filename = os.path.basename(filepath)
         l_regex = lang_settings.get('regex', r'[А-Яа-яЁё]')
         bak_path = filepath + ".bak"
