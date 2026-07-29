@@ -11,6 +11,7 @@ class OpenRouterEngine(BatchLlmEngine):
         api_key: str,
         model: str,
         *,
+        api_url: str = OPENROUTER_API,
         mode: str = "safe",
         context: str = "",
         site_url: str = "",
