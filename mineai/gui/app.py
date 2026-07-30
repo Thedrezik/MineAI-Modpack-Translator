@@ -290,8 +290,11 @@ class TranslatorApp(ctk.CTk):
             self.log("▶ Продолжение", "green")
 
     def _stop(self) -> None:
-        job = self._job_instance()
-        job.stop()
+        active_job = self._job
+        if active_job is not None:
+            active_job.stop()
+        else:
+            self.job_state.stop()
         self.btn_stop.configure(state="disabled")
         self.btn_pause.configure(state="disabled")
         self.set_status("🛑 Остановка...", 1.0)
@@ -306,13 +309,16 @@ class TranslatorApp(ctk.CTk):
         self.job_state.is_running = True
         self.job_state.is_paused = False
         self._clear_log()
+        self._job = self._job_instance()
         threading.Thread(target=self._run_analysis_thread, daemon=True).start()
 
     def _run_analysis_thread(self) -> None:
         try:
-            self._job_instance().run_analysis(self._translation_options())
+            if self._job is not None:
+                self._job.run_analysis(self._translation_options())
         finally:
             self.job_state.is_running = False
+            self._job = None
             self._lock_ui(False)
 
     def _start_translation(self) -> None:
@@ -326,13 +332,16 @@ class TranslatorApp(ctk.CTk):
         self.job_state.is_paused = False
         self.btn_pause.configure(text="⏸ ПАУЗА", fg_color="#ffc107", text_color="black")
         self._clear_log()
+        self._job = self._job_instance()
         threading.Thread(target=self._run_translation_thread, daemon=True).start()
 
     def _run_translation_thread(self) -> None:
         try:
-            self._job_instance().run_translation(self._translation_options())
+            if self._job is not None:
+                self._job.run_translation(self._translation_options())
         finally:
             self.job_state.is_running = False
+            self._job = None
             self._lock_ui(False)
 
 
