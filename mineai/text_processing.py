@@ -4,6 +4,9 @@ from functools import lru_cache
 
 from mineai.constants import DICT_FILE, IGNORE_TERMS
 
+
+PLACEHOLDER_PATTERN = re.compile(r"\[\s*#\s*(\d+)\s*#\s*\]")
+
 FORMAT_PATTERN = re.compile(
     r"("
     r"\$\([^)]+\)|"
@@ -93,11 +96,17 @@ def polish_translation(text: str) -> str:
 
 
 def mask_protected_fragments(text: str) -> tuple[str, dict[str, str]]:
-    """Replace format codes and protected terms with [#n#] placeholders."""
+    """Replace format codes and protected terms with collision-free placeholders."""
     mapping: dict[str, str] = {}
+    reserved_ids = set(PLACEHOLDER_PATTERN.findall(text))
+    next_id = 0
 
     def replacer(match: re.Match) -> str:
-        token = f"[#{len(mapping)}#]"
+        nonlocal next_id
+        while str(next_id) in reserved_ids:
+            next_id += 1
+        token = f"[#{next_id}#]"
+        next_id += 1
         mapping[token] = match.group(0)
         return token
 

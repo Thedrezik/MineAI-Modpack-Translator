@@ -1,11 +1,19 @@
 import json
 import re
+from collections import Counter
 from typing import Callable
 
 import requests
 
 from mineai.engines.base import EngineCallbacks, EngineItem, TranslationEngine
-from mineai.text_processing import polish_translation, unmask_translation
+from mineai.text_processing import (
+    PLACEHOLDER_PATTERN,
+    polish_translation,
+    unmask_translation,
+)
+
+
+RETRY_BATCH_SIZE = 10
 
 
 def build_translation_prompt(
@@ -18,23 +26,40 @@ def build_translation_prompt(
     blob = json.dumps(payload, ensure_ascii=False)
     if mode == "context" and context:
         return (
-            f"Ты локализатор Minecraft. Переведи строки мода/квеста «{context}» на {lang_name}. "
-            f"Сохраняй игровой стиль и лор. Не переводи JSON-ключи. Теги [#0#] не менять. "
-            f"Верни ТОЛЬКО валидный JSON с теми же ключами. Данные: {blob}"
+            f"Ты локализатор Minecraft. Переведи строки мода/квеста "
+            f"«{context}» на {lang_name}. Сохраняй игровой стиль и лор. "
+            f"Не переводи JSON-ключи. Все маркеры вида [#N#], например "
+            f"[#0#] и [#1#], сохраняй без изменений: не удаляй, не "
+            f"добавляй, не дублируй и не переименовывай их. Верни ТОЛЬКО "
+            f"валидный JSON с теми же ключами. Данные: {blob}"
         )
     return (
         f"Translate JSON string values from English to {lang_name}. "
-        f"Do not translate keys. Preserve [#0#] tags exactly. "
-        f"Return ONLY valid JSON with the same keys. Data: {blob}"
+        f"Do not translate keys. Preserve every [#N#] placeholder exactly, "
+        f"for example [#0#] and [#1#]. Do not add, remove, duplicate, or "
+        f"rename placeholders. Return ONLY valid JSON with the same keys. "
+        f"Data: {blob}"
     )
 
 
-def parse_llm_json_response(content: str) -> dict:
-    text = re.sub(r"^```json\s*|^```\s*|```$", "", content.strip(), flags=re.IGNORECASE).strip()
+def parse_llm_json_response(content: str) -> dict[str, object]:
+    text = re.sub(
+        r"^```json\s*|^```\s*|```$",
+        "",
+        content.strip(),
+        flags=re.IGNORECASE,
+    ).strip()
     data = json.loads(text)
     if not isinstance(data, dict):
         raise TypeError("LLM response is not a JSON object")
     return data
+
+
+def placeholders_match(text: str, expected_text: str) -> bool:
+    """Return whether all placeholders are preserved with equal multiplicity."""
+    expected_ids = Counter(PLACEHOLDER_PATTERN.findall(expected_text))
+    actual_ids = Counter(PLACEHOLDER_PATTERN.findall(text))
+    return actual_ids == expected_ids
 
 
 class BatchLlmEngine(TranslationEngine):
@@ -66,14 +91,37 @@ class BatchLlmEngine(TranslationEngine):
         i = 0
         while i < len(keys) and callbacks.should_run():
             callbacks.wait_if_paused()
+            if not callbacks.should_run():
+                break
+
             chunk = keys[i : i + self.batch_size]
-            if not self._translate_chunk(chunk, items, target_lang, result, callbacks):
-                callbacks.on_log(f"❌ Ошибка {self.label}. Дробим пакет...", "yellow")
-                for j in range(0, len(chunk), 10):
-                    sub = chunk[j : j + 10]
-                    if not self._translate_chunk(sub, items, target_lang, result, callbacks):
-                        for key in sub:
-                            result[key] = items[key].original
+            failed = self._translate_chunk(
+                chunk,
+                items,
+                target_lang,
+                result,
+                callbacks,
+            )
+            if failed and callbacks.should_run():
+                callbacks.on_log(
+                    f"❌ Ошибка {self.label}. Повторяем проблемные строки...",
+                    "yellow",
+                )
+                for j in range(0, len(failed), RETRY_BATCH_SIZE):
+                    if not callbacks.should_run():
+                        break
+                    callbacks.wait_if_paused()
+                    if not callbacks.should_run():
+                        break
+
+                    sub = failed[j : j + RETRY_BATCH_SIZE]
+                    self._translate_chunk(
+                        sub,
+                        items,
+                        target_lang,
+                        result,
+                        callbacks,
+                    )
             i += self.batch_size
         return result
 
@@ -84,8 +132,8 @@ class BatchLlmEngine(TranslationEngine):
         target_lang: dict,
         result: dict[str, str],
         callbacks: EngineCallbacks,
-    ) -> bool:
-        payload = {k: items[k].masked for k in chunk_keys}
+    ) -> list[str]:
+        payload = {key: items[key].masked for key in chunk_keys}
         prompt = build_translation_prompt(
             payload,
             target_lang["name"],
@@ -96,18 +144,40 @@ class BatchLlmEngine(TranslationEngine):
         try:
             content = self._call_api(prompt, self.max_tokens)
             if not content:
-                return False
+                return chunk_keys
+
             translated = parse_llm_json_response(content)
+            unexpected = set(translated) - set(chunk_keys)
+            if unexpected:
+                callbacks.on_log(
+                    f"⚠️ {self.label}: отброшены лишние JSON-ключи — "
+                    f"{len(unexpected)}",
+                    "yellow",
+                )
+
+            failed: list[str] = []
             for key in chunk_keys:
-                if key in translated:
-                    text = unmask_translation(str(translated[key]), items[key].mapping)
-                    result[key] = polish_translation(text)
-                else:
-                    result[key] = items[key].original
-            return True
+                raw = translated.get(key)
+                if not isinstance(raw, str):
+                    failed.append(key)
+                    continue
+                if not placeholders_match(raw, items[key].masked):
+                    failed.append(key)
+                    continue
+
+                text = unmask_translation(raw, items[key].mapping)
+                result[key] = polish_translation(text)
+
+            if failed:
+                callbacks.on_log(
+                    f"❌ {self.label}: не прошли проверку — "
+                    f"{len(failed)} строк",
+                    "red",
+                )
+            return failed
         except (json.JSONDecodeError, TypeError, KeyError) as exc:
             callbacks.on_log(f"❌ {self.label}: неверный JSON — {exc}", "red")
-            return False
+            return chunk_keys
         except requests.RequestException as exc:
             callbacks.on_log(f"❌ {self.label}: сеть — {exc}", "red")
-            return False
+            return chunk_keys
