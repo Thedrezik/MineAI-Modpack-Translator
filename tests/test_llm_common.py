@@ -27,11 +27,12 @@ def callbacks(
     *,
     should_run=lambda: True,
     wait_if_paused=lambda: None,
+    on_log=lambda _message, _tag: None,
 ) -> EngineCallbacks:
     return EngineCallbacks(
         should_run=should_run,
         wait_if_paused=wait_if_paused,
-        on_log=lambda _message, _tag: None,
+        on_log=on_log,
         on_status=lambda _message: None,
     )
 
@@ -190,15 +191,65 @@ class BatchLlmEngineTests(unittest.TestCase):
         self.assertEqual(result, {"key": "Перевод"})
         self.assertEqual(calls, 1)
 
-    def test_omits_value_after_two_invalid_responses(self) -> None:
-        engine = BatchLlmEngine(
-            call_api=lambda _prompt, _limit: json.dumps({"key": None})
-        )
-        items = {"key": EngineItem("key", "Original", "Original")}
+    def test_retries_until_a_remaining_value_becomes_valid(self) -> None:
+        calls: list[set[str]] = []
+
+        def call_api(prompt: str, _limit: int) -> str:
+            payload = prompt_payload(prompt)
+            calls.append(set(payload))
+            if len(calls) == 1:
+                response = {"first": "Первый", "second": None, "third": None}
+            elif len(calls) == 2:
+                response = {"second": "Второй", "third": None}
+            else:
+                response = {"third": "Третий"}
+            return json.dumps(response, ensure_ascii=False)
+
+        engine = BatchLlmEngine(call_api=call_api)
+        items = {
+            "first": EngineItem("first", "First", "First"),
+            "second": EngineItem("second", "Second", "Second"),
+            "third": EngineItem("third", "Third", "Third"),
+        }
 
         result = engine.translate_batch(items, TARGET_LANG, callbacks())
 
+        self.assertEqual(
+            result,
+            {"first": "Первый", "second": "Второй", "third": "Третий"},
+        )
+        self.assertEqual(
+            calls,
+            [
+                {"first", "second", "third"},
+                {"second", "third"},
+                {"third"},
+            ],
+        )
+
+    def test_stops_retrying_and_reports_persistent_failures(self) -> None:
+        calls = 0
+        logs: list[str] = []
+
+        def call_api(_prompt: str, _limit: int) -> str:
+            nonlocal calls
+            calls += 1
+            return json.dumps({"key": None})
+
+        engine = BatchLlmEngine(call_api=call_api)
+        items = {"key": EngineItem("key", "Original", "Original")}
+
+        result = engine.translate_batch(
+            items,
+            TARGET_LANG,
+            callbacks(on_log=lambda message, _tag: logs.append(message)),
+        )
+
         self.assertNotIn("key", result)
+        self.assertEqual(calls, 4)
+        self.assertTrue(
+            any("не удалось перевести после повторов — 1 строк" in log for log in logs)
+        )
 
     def test_rejects_an_added_placeholder(self) -> None:
         responses = iter(

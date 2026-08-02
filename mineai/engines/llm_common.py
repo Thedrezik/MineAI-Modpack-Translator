@@ -13,7 +13,7 @@ from mineai.text_processing import (
 )
 
 
-RETRY_BATCH_SIZE = 10
+RETRY_BATCH_SIZES = (10, 5, 1)
 
 
 def build_translation_prompt(
@@ -102,26 +102,44 @@ class BatchLlmEngine(TranslationEngine):
                 result,
                 callbacks,
             )
-            if failed and callbacks.should_run():
+            for retry_number, retry_batch_size in enumerate(
+                RETRY_BATCH_SIZES,
+                start=1,
+            ):
+                if not failed or not callbacks.should_run():
+                    break
+
                 callbacks.on_log(
-                    f"❌ Ошибка {self.label}. Повторяем проблемные строки...",
+                    f"🔁 {self.label}: повтор {retry_number}/"
+                    f"{len(RETRY_BATCH_SIZES)} — {len(failed)} строк",
                     "yellow",
                 )
-                for j in range(0, len(failed), RETRY_BATCH_SIZE):
+                retry_failed: list[str] = []
+                for j in range(0, len(failed), retry_batch_size):
                     if not callbacks.should_run():
                         break
                     callbacks.wait_if_paused()
                     if not callbacks.should_run():
                         break
 
-                    sub = failed[j : j + RETRY_BATCH_SIZE]
-                    self._translate_chunk(
-                        sub,
-                        items,
-                        target_lang,
-                        result,
-                        callbacks,
+                    sub = failed[j : j + retry_batch_size]
+                    retry_failed.extend(
+                        self._translate_chunk(
+                            sub,
+                            items,
+                            target_lang,
+                            result,
+                            callbacks,
+                        )
                     )
+                failed = retry_failed
+
+            if failed and callbacks.should_run():
+                callbacks.on_log(
+                    f"⚠️ {self.label}: не удалось перевести после повторов — "
+                    f"{len(failed)} строк; сохранён исходный текст",
+                    "yellow",
+                )
             i += self.batch_size
         return result
 
