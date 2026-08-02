@@ -13,6 +13,7 @@ class ConfigManager:
             "theme": "Dark",
             "color": "blue",
             "smart_glue": "True",
+            "smart_glossary": "True",
             "google_workers": "5",
         },
         "AI": {

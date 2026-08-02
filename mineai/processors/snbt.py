@@ -62,14 +62,17 @@ class SnbtProcessor:
         self.callbacks.on_log(f"⚡ Перевод {name} [Квесты] — {len(strings)} строк", "yellow")
         
         chunk = {str(i): s for i, s in enumerate(strings)}
-        # ДОБАВЛЕНО: prompt_type="quests"
-        translated = self.service.translate_dict(chunk, target_lang, self.callbacks, context=name, prompt_type="quests")
-        
-        # --- НОВАЯ ПРОВЕРКА ОТМЕНЫ ---
+        translated = self.service.translate_dict(
+            chunk,
+            target_lang,
+            self.callbacks,
+            context=name,
+            prompt_type="quests",
+            scope="ftbquests",
+        )
+
         if not self.state.should_run():
             return
-        # -----------------------------
-        
         mapping = {strings[i]: translated.get(str(i), strings[i]) for i in range(len(strings))}
         
         self.state.increment_translated(len(mapping))

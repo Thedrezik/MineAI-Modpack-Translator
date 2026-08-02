@@ -1,12 +1,15 @@
+import os
 import time
 import traceback
 from dataclasses import dataclass
 
 from mineai.cache import TranslationCache
 from mineai.config import ConfigManager
-from mineai.constants import CACHE_FILE_AI, CACHE_FILE_STD, LANGUAGES
+from mineai.constants import GLOSSARIES_DIR, LANGUAGES
 from mineai.engines.base import EngineCallbacks
 from mineai.engines.service import TranslationService
+from mineai.glossary import SUPPORTED_LANGUAGE, SmartGlossary
+from mineai.glossary_harvester import GlossaryHarvester
 from mineai.output.pack_writer import PackWriter
 from mineai.processors.analyzer import ModpackAnalyzer
 from mineai.processors.discovery import discover_jar_files, discover_loose_lang_files, discover_snbt_files, discover_bq_files
@@ -35,6 +38,7 @@ class TranslationOptions:
     translate_mods: bool
     translate_books: bool
     translate_quests: bool
+    use_glossary: bool = True
 
 
 class TranslationJob:
@@ -124,6 +128,46 @@ class TranslationJob:
             self.on_log("❌ Нечего переводить!", "red")
             return
 
+        glossary: SmartGlossary | None = None
+        glossary_stats = None
+        glossary_enabled = options.use_glossary and lang["file"] == SUPPORTED_LANGUAGE
+        if options.use_glossary and not glossary_enabled:
+            self.on_log("🧠 Умный глоссарий доступен только для ru_ru", "dim")
+        if glossary_enabled:
+            self.on_log("🧠 Сканирование существующих переводов...", "yellow")
+            harvester = GlossaryHarvester()
+            harvester.collect_from_jars(jars)
+            harvester.collect_from_loose_json(loose, options.mc_dir)
+            generated_path = os.path.join(
+                GLOSSARIES_DIR,
+                SUPPORTED_LANGUAGE,
+                "generated.json",
+            )
+            try:
+                glossary_stats = harvester.save_generated(generated_path)
+            except OSError as exc:
+                self.on_log(f"⚠️ Не удалось сохранить generated.json: {exc}", "yellow")
+            glossary = SmartGlossary.load(root=GLOSSARIES_DIR)
+            self.on_log("🧠 Умный глоссарий включён", "cyan")
+            self.on_log(
+                f"   Встроенных правил: {glossary.source_counts.get('builtin', 0)}",
+                "dim",
+            )
+            self.on_log(
+                f"   Пользовательских правил: {glossary.source_counts.get('user', 0)}",
+                "dim",
+            )
+            self.on_log(
+                f"   Найдено в сборке: {glossary.source_counts.get('generated', 0)}",
+                "dim",
+            )
+            self.on_log(f"   Конфликтов: {glossary.conflicts}", "dim")
+            self.on_log(f"   Файл: {generated_path}", "dim")
+            for warning in glossary.warnings:
+                self.on_log(f"⚠️ {warning}", "yellow")
+        else:
+            self.on_log("🧠 Умный глоссарий выключен", "dim")
+
         self.on_log("📊 Подсчёт строк...", "yellow")
         estimator = StringEstimator(self.state)
         self.state.total_strings = estimator.estimate(
@@ -170,6 +214,7 @@ class TranslationJob:
             ai_mode=options.ai_mode,
             ai_batch=options.ai_batch,
             ai_provider=options.ai_provider,
+            glossary=glossary,
         )
         callbacks = self._callbacks()
         jar_proc = JarProcessor(service, self.state, callbacks)
@@ -262,6 +307,19 @@ class TranslationJob:
             self.on_status("Остановлено", 1.0)
         else:
             self.on_log("\n✅ ПЕРЕВОД УСПЕШНО ЗАВЕРШЕН!", "green")
+            if glossary:
+                self.on_log(
+                    "🧠 Глоссарий: "
+                    f"точных совпадений {glossary.stats.exact_matches}, "
+                    f"подстановок {glossary.stats.term_substitutions}",
+                    "cyan",
+                )
+                if glossary_stats:
+                    self.on_log(
+                        f"   Собрано правил: {glossary_stats.entries}; "
+                        f"конфликтов: {glossary_stats.conflicts}",
+                        "dim",
+                    )
             if options.output_mode == "resourcepack":
                 self.on_log("💡 Включите ресурспак и датапак в игре.", "yellow")
             self.on_status("Все задачи выполнены!", 1.0)
