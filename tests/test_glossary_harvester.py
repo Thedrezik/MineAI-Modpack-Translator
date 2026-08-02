@@ -9,6 +9,7 @@ from mineai.glossary_harvester import (
     is_safe_candidate,
     scope_from_locale_path,
 )
+from mineai.glossary import SmartGlossary
 
 
 class GlossaryHarvesterTests(unittest.TestCase):
@@ -54,7 +55,7 @@ class GlossaryHarvesterTests(unittest.TestCase):
             self.assertEqual(1, stats.entries)
             self.assertEqual("Mechanical Press", payload["entries"][0]["source"])
             self.assertEqual(["create"], payload["entries"][0]["scope"])
-            self.assertEqual("phrase", payload["entries"][0]["apply"])
+            self.assertEqual("exact", payload["entries"][0]["apply"])
 
     def test_collects_loose_pairs_by_matching_keys(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -95,6 +96,67 @@ class GlossaryHarvesterTests(unittest.TestCase):
             self.assertEqual(1, stats.conflicts)
             self.assertEqual([], payload["entries"])
             self.assertEqual("Pin", payload["conflicts"][0]["source"])
+            self.assertEqual(2, len(payload["conflicts"][0]["variants"]))
+
+    def test_case_variants_with_same_target_are_merged(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            lang_dir = root / "assets" / "controls" / "lang"
+            lang_dir.mkdir(parents=True)
+            source = lang_dir / "en_us.json"
+            target = lang_dir / "ru_ru.json"
+            source.write_text(
+                json.dumps({"a": "None", "b": "NONE"}),
+                encoding="utf-8",
+            )
+            target.write_text(
+                json.dumps({"a": "Нет", "b": "Нет"}),
+                encoding="utf-8",
+            )
+
+            harvester = GlossaryHarvester()
+            harvester.collect_from_loose_json([str(source)], str(root))
+            output = root / "generated.json"
+            stats = harvester.save_generated(output)
+            payload = json.loads(output.read_text(encoding="utf-8"))
+
+            self.assertEqual(1, stats.entries)
+            self.assertEqual(0, stats.conflicts)
+            self.assertEqual(2, payload["entries"][0]["occurrences"])
+
+            glossary_root = root / "glossaries"
+            generated = glossary_root / "ru_ru" / "generated.json"
+            generated.parent.mkdir(parents=True)
+            generated.write_text(output.read_text(encoding="utf-8"), encoding="utf-8")
+            glossary = SmartGlossary.load(root=glossary_root)
+            self.assertFalse(
+                any("дублирующееся правило" in warning for warning in glossary.warnings)
+            )
+
+    def test_case_variants_with_different_targets_are_conflicts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            lang_dir = root / "assets" / "controls" / "lang"
+            lang_dir.mkdir(parents=True)
+            source = lang_dir / "en_us.json"
+            target = lang_dir / "ru_ru.json"
+            source.write_text(
+                json.dumps({"a": "Off", "b": "OFF"}),
+                encoding="utf-8",
+            )
+            target.write_text(
+                json.dumps({"a": "Выкл.", "b": "ВЫКЛ."}),
+                encoding="utf-8",
+            )
+
+            harvester = GlossaryHarvester()
+            harvester.collect_from_loose_json([str(source)], str(root))
+            output = root / "generated.json"
+            stats = harvester.save_generated(output)
+            payload = json.loads(output.read_text(encoding="utf-8"))
+
+            self.assertEqual(0, stats.entries)
+            self.assertEqual(1, stats.conflicts)
             self.assertEqual(2, len(payload["conflicts"][0]["variants"]))
 
 

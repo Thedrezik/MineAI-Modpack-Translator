@@ -50,6 +50,25 @@ class SmartGlossary:
     conflicts: int = 0
     warnings: list[str] = field(default_factory=list)
     stats: GlossaryStats = field(default_factory=GlossaryStats)
+    _exact_casefold: dict[str, list[GlossaryEntry]] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+    )
+    _exact_case_sensitive: dict[str, list[GlossaryEntry]] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+    )
+    _term_patterns: list[tuple[GlossaryEntry, re.Pattern[str]]] = field(
+        default_factory=list,
+        init=False,
+        repr=False,
+    )
+    _fingerprint: str | None = field(default=None, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self._rebuild_indexes()
 
     @classmethod
     def load(
@@ -125,12 +144,15 @@ class SmartGlossary:
                 if isinstance(conflicts, list):
                     glossary.conflicts = len(conflicts)
 
+        glossary._rebuild_indexes()
         return glossary
 
     @property
     def fingerprint(self) -> str:
         if not self.entries:
             return ""
+        if self._fingerprint is not None:
+            return self._fingerprint
         canonical = [
             {
                 "source": entry.source,
@@ -159,14 +181,15 @@ class SmartGlossary:
             sort_keys=True,
             separators=(",", ":"),
         )
-        return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:8]
+        self._fingerprint = hashlib.sha256(blob.encode("utf-8")).hexdigest()[:8]
+        return self._fingerprint
 
     def exact_translation(self, text: str, scope: str) -> str | None:
         candidates = [
-            entry
-            for entry in self.entries
-            if entry.applies_to_scope(scope) and _full_match(entry, text)
+            *self._exact_case_sensitive.get(text, ()),
+            *self._exact_casefold.get(text.casefold(), ()),
         ]
+        candidates = [entry for entry in candidates if entry.applies_to_scope(scope)]
         if not candidates:
             return None
         winner = max(candidates, key=lambda entry: _entry_rank(entry, scope))
@@ -181,26 +204,20 @@ class SmartGlossary:
     ) -> tuple[str, int]:
         """Mask phrase/protect entries, restoring tokens to approved targets."""
         candidates = [
-            entry
-            for entry in self.entries
-            if entry.apply in {"phrase", "protect"} and entry.applies_to_scope(scope)
+            (entry, pattern)
+            for entry, pattern in self._term_patterns
+            if entry.applies_to_scope(scope)
         ]
         candidates.sort(
-            key=lambda entry: (
-                len(entry.source),
-                *_entry_rank(entry, scope),
+            key=lambda item: (
+                len(item[0].source),
+                *_entry_rank(item[0], scope),
             ),
             reverse=True,
         )
 
         substitutions = 0
-        for entry in candidates:
-            flags = 0 if entry.case_sensitive else re.IGNORECASE
-            pattern = re.compile(
-                rf"(?<!\w){re.escape(entry.source)}(?!\w)",
-                flags=flags,
-            )
-
+        for entry, pattern in candidates:
             def replace(_match: re.Match[str], target: str = entry.target) -> str:
                 nonlocal substitutions
                 token = f"[#{len(mapping)}#]"
@@ -212,6 +229,28 @@ class SmartGlossary:
 
         self.stats.term_substitutions += substitutions
         return text, substitutions
+
+    def _rebuild_indexes(self) -> None:
+        self._exact_casefold = {}
+        self._exact_case_sensitive = {}
+        self._term_patterns = []
+        self._fingerprint = None
+        for entry in self.entries:
+            if entry.case_sensitive:
+                index = self._exact_case_sensitive
+                key = entry.source
+            else:
+                index = self._exact_casefold
+                key = entry.source.casefold()
+            index.setdefault(key, []).append(entry)
+
+            if entry.apply in {"phrase", "protect"}:
+                flags = 0 if entry.case_sensitive else re.IGNORECASE
+                pattern = re.compile(
+                    rf"(?<!\w){re.escape(entry.source)}(?!\w)",
+                    flags=flags,
+                )
+                self._term_patterns.append((entry, pattern))
 
 
 def normalize_scope(scope: str) -> str:
@@ -308,12 +347,6 @@ def _parse_entry(
         note=str(raw.get("note", "")),
         origin=origin,
     )
-
-
-def _full_match(entry: GlossaryEntry, text: str) -> bool:
-    if entry.case_sensitive:
-        return entry.source == text
-    return entry.source.casefold() == text.casefold()
 
 
 def _entry_rank(entry: GlossaryEntry, scope: str) -> tuple[int, int, int]:

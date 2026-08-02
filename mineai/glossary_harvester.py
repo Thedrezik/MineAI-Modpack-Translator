@@ -93,10 +93,11 @@ class GlossaryHarvester:
         entries: list[dict] = []
         conflicts: list[dict] = []
 
-        for (source, scope), variants in sorted(
+        for (_normalized_source, scope), variants in sorted(
             self._candidates.items(),
             key=lambda item: (item[0][1], item[0][0].casefold()),
         ):
+            source = _canonical_source(variants)
             if len(variants) == 1:
                 target, metadata = next(iter(variants.items()))
                 entries.append(
@@ -104,7 +105,7 @@ class GlossaryHarvester:
                         "source": source,
                         "target": target,
                         "scope": [scope],
-                        "apply": "exact" if len(source.split()) == 1 else "phrase",
+                        "apply": "exact",
                         "case_sensitive": False,
                         "priority": 50,
                         "occurrences": metadata["count"],
@@ -172,13 +173,14 @@ class GlossaryHarvester:
             if not is_safe_candidate(source, target):
                 continue
             self.pairs_seen += 1
-            candidate_key = (source, normalize_scope(scope))
+            candidate_key = (source.casefold(), normalize_scope(scope))
             metadata = self._candidates[candidate_key].setdefault(
                 target,
-                {"count": 0, "sources": set()},
+                {"count": 0, "sources": set(), "source_forms": defaultdict(int)},
             )
             metadata["count"] += 1
             metadata["sources"].add(provenance)
+            metadata["source_forms"][source] += 1
 
 
 def is_safe_candidate(source: str, target: str) -> bool:
@@ -215,3 +217,14 @@ def scope_from_locale_path(path: str) -> str:
 def _load_file(path: str) -> dict:
     with open(path, "rb") as file_handle:
         return load_lenient_json(file_handle.read())
+
+
+def _canonical_source(variants: dict[str, dict]) -> str:
+    counts: dict[str, int] = defaultdict(int)
+    for metadata in variants.values():
+        for source, count in metadata["source_forms"].items():
+            counts[source] += count
+    return min(
+        counts,
+        key=lambda source: (-counts[source], source.casefold(), source),
+    )
