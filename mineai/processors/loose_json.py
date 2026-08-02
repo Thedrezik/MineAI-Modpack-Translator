@@ -65,6 +65,8 @@ class LooseJsonProcessor:
             translated = self.service.translate_dict(
                 pending, target_lang, self.callbacks, context="Локализация Квестов/Скриптов"
             )
+            if not self.state.should_run():
+                return
             merged.update(translated)
             self.state.increment_translated(len(translated))
 
