@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "language": "ru_ru",
+  "entries": [
+    {
+      "source": "Example Machine",
+      "target": "Пример механизма",
+      "scope": ["example_mod"],
+      "apply": "phrase",
+      "case_sensitive": false,
+      "priority": 100,
+      "note": "Скопируйте нужное правило в glossaries/ru_ru/user.json"
+    }
+  ]
+}

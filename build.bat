@@ -17,7 +17,7 @@ if errorlevel 1 (
 
 echo [2/3] PyInstaller...
 :: Добавлен флаг --icon="icon.ico"
-python -m PyInstaller --noconfirm --clean --onefile --noconsole --icon="icon.ico" --name "MineAI_Translator" mineai\__main__.py
+python -m PyInstaller --noconfirm --clean --onefile --noconsole --icon="icon.ico" --add-data "mineai\data;mineai\data" --name "MineAI_Translator" mineai\__main__.py
 if errorlevel 1 (
     echo Ошибка сборки.
     pause
@@ -29,6 +29,6 @@ echo [3/3] Готово!
 echo    EXE: dist\MineAI_Translator.exe
 echo.
 echo Рядом с EXE положите при необходимости:
-echo    settings.ini, dictionary.json, cache.json
+echo    settings.ini, dictionary.json, cache.json, glossaries\
 echo.
 pause
