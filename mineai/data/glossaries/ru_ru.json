@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "language": "ru_ru",
+  "entries": [
+    {
+      "source": "Create",
+      "target": "Create",
+      "scope": ["*"],
+      "apply": "protect",
+      "case_sensitive": true,
+      "priority": 100,
+      "note": "Название мода"
+    },
+    {
+      "source": "Mekanism",
+      "target": "Mekanism",
+      "scope": ["*"],
+      "apply": "protect",
+      "case_sensitive": true,
+      "priority": 100,
+      "note": "Название мода"
+    },
+    {
+      "source": "Mechanical Press",
+      "target": "Механический пресс",
+      "scope": ["create"],
+      "apply": "phrase",
+      "case_sensitive": false,
+      "priority": 80
+    },
+    {
+      "source": "Pin",
+      "target": "Закрепить",
+      "scope": ["ftbquests"],
+      "apply": "exact",
+      "case_sensitive": false,
+      "priority": 80
+    },
+    {
+      "source": "Copper Nugget",
+      "target": "Медный самородок",
+      "scope": ["*"],
+      "apply": "exact",
+      "case_sensitive": false,
+      "priority": 60
+    }
+  ]
+}

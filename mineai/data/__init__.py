@@ -1,0 +1,1 @@
+"""Bundled MineAI data files."""

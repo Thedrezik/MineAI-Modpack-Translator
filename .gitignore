@@ -5,18 +5,17 @@ dist/
 
 # Кэш Python
 __pycache__/
-*.pyc
+*.py[cod]
 *.pyo
 *.pyd
 
-# Локальные настройки и кэши приложения
+# Локальные настройки, кэши и логи приложения
 settings.ini
 dictionary.json
+cache.json
+ai_cache.json
 ai_error_log.txt
 mineai_log.txt
 prompts.json
-mineai/__pycache__/__init__.cpython-312.pyc
-mineai/__pycache__/__init__.cpython-312.pyc
-/mineai/__pycache__
-/mineai/__pycache__
-/mineai/engines/__pycache__
+glossaries/*/generated.json
+glossaries/*/user.json

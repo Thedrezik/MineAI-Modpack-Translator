@@ -40,16 +40,23 @@ class TranslationCache:
                 self._flush_unlocked()
         return changes
 
-    def make_key(self, api_code: str, source_text: str) -> str:
-        return f"{api_code}_{source_text}"
+    def make_key(self, api_code: str, source_text: str, variant: str = "") -> str:
+        namespace = f"{api_code}@g:{variant}" if variant else api_code
+        return f"{namespace}_{source_text}"
 
-    def get(self, api_code: str, source_text: str) -> str | None:
-        key = self.make_key(api_code, source_text)
+    def get(self, api_code: str, source_text: str, variant: str = "") -> str | None:
+        key = self.make_key(api_code, source_text, variant)
         with self._lock:
             return self._data.get(key)
 
-    def set(self, api_code: str, source_text: str, translated: str) -> None:
-        key = self.make_key(api_code, source_text)
+    def set(
+        self,
+        api_code: str,
+        source_text: str,
+        translated: str,
+        variant: str = "",
+    ) -> None:
+        key = self.make_key(api_code, source_text, variant)
         with self._lock:
             self._data[key] = translated
             self._dirty = True
