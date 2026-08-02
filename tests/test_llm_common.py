@@ -47,10 +47,25 @@ class MemoryCache:
     def __init__(self) -> None:
         self.values: dict[tuple[str, str], str] = {}
 
-    def get(self, api_code: str, source: str) -> str | None:
+    def get(
+        self,
+        api_code: str,
+        source: str,
+        *,
+        variant: str = "",
+    ) -> str | None:
+        del variant
         return self.values.get((api_code, source))
 
-    def set(self, api_code: str, source: str, translated: str) -> None:
+    def set(
+        self,
+        api_code: str,
+        source: str,
+        translated: str,
+        *,
+        variant: str = "",
+    ) -> None:
+        del variant
         self.values[(api_code, source)] = translated
 
     def save_if_threshold(self) -> None:
