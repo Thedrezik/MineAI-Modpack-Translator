@@ -184,6 +184,7 @@ class TranslationJob:
         total_items = len(jars) + len(loose) + len(snbt) + len(bq_files)
         done = 0
 
+        failed = False
         try:
             for path in jars:
                 if not self.state.should_run():
@@ -250,6 +251,7 @@ class TranslationJob:
 
             cache.save()
         except Exception:
+            failed = True
             self.on_log(f"\n❌ КРИТИЧЕСКАЯ ОШИБКА:\n{traceback.format_exc()}", "red")
         finally:
             if pack_writer:
@@ -257,7 +259,9 @@ class TranslationJob:
             if options.engine == "ai":
                 pass  # keep AI running for user
 
-        if not self.state.should_run():
+        if failed:
+            self.on_status("Ошибка перевода", 1.0)
+        elif not self.state.should_run():
             self.on_log("\n🛑 ОСТАНОВЛЕНО.", "red")
             self.on_status("Остановлено", 1.0)
         else:

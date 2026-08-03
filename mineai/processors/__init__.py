@@ -1,8 +1,4 @@
-from mineai.processors.analyzer import ModpackAnalyzer
-from mineai.processors.jar import JarProcessor
-from mineai.processors.loose_json import LooseJsonProcessor
-from mineai.processors.snbt import SnbtProcessor
-from mineai.processors.estimator import StringEstimator
+from importlib import import_module
 
 __all__ = [
     "ModpackAnalyzer",
@@ -11,3 +7,21 @@ __all__ = [
     "SnbtProcessor",
     "StringEstimator",
 ]
+
+_EXPORTS = {
+    "ModpackAnalyzer": ("mineai.processors.analyzer", "ModpackAnalyzer"),
+    "JarProcessor": ("mineai.processors.jar", "JarProcessor"),
+    "LooseJsonProcessor": ("mineai.processors.loose_json", "LooseJsonProcessor"),
+    "SnbtProcessor": ("mineai.processors.snbt", "SnbtProcessor"),
+    "StringEstimator": ("mineai.processors.estimator", "StringEstimator"),
+}
+
+
+def __getattr__(name: str):
+    try:
+        module_name, attribute = _EXPORTS[name]
+    except KeyError as exc:
+        raise AttributeError(name) from exc
+    value = getattr(import_module(module_name), attribute)
+    globals()[name] = value
+    return value

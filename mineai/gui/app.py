@@ -1,4 +1,5 @@
 import os
+import queue
 import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox
@@ -32,10 +33,13 @@ class TranslatorApp(ctk.CTk):
         self.job_state = JobState()
         self.cache_std, self.cache_ai, polish_total = load_both_caches()
         self._job: TranslationJob | None = None
+        self._ui_thread_id = threading.get_ident()
+        self._ui_queue: queue.Queue[tuple[object, tuple]] = queue.Queue()
         self.auto_scroll = True
 
         self._build_ui()
         self._refresh_folder_label()
+        self.after(50, self._drain_ui_queue)
 
         if polish_total:
             self.log(f"✨ Кэш отполирован: исправлено {polish_total} строк.", "magenta")
@@ -283,7 +287,26 @@ class TranslatorApp(ctk.CTk):
     def _on_scroll_interaction(self) -> None:
         self.auto_scroll = self.textbox.yview()[1] >= 0.99
 
+    def _ensure_ui_thread(self, callback, *args) -> bool:
+        """Queue Tk work without calling any Tk API from a worker thread."""
+        ui_thread_id = getattr(self, "_ui_thread_id", threading.main_thread().ident)
+        if threading.get_ident() != ui_thread_id:
+            self._ui_queue.put((callback, args))
+            return False
+        return True
+
+    def _drain_ui_queue(self) -> None:
+        while True:
+            try:
+                callback, args = self._ui_queue.get_nowait()
+            except queue.Empty:
+                break
+            callback(*args)
+        self.after(50, self._drain_ui_queue)
+
     def log(self, message: str, tag: str = "white") -> None:
+        if not self._ensure_ui_thread(self.log, message, tag):
+            return
         self.textbox.configure(state="normal")
         at_bottom = self.textbox.yview()[1] >= 0.99
         self.textbox.insert("end", message + "\n", tag)
@@ -299,6 +322,16 @@ class TranslatorApp(ctk.CTk):
             pass
 
     def log_row(self, icon: str, name: str, kind: str, trans_c: int, en_c: int, pct: int) -> None:
+        if not self._ensure_ui_thread(
+            self.log_row,
+            icon,
+            name,
+            kind,
+            trans_c,
+            en_c,
+            pct,
+        ):
+            return
         self.textbox.configure(state="normal")
         at_bottom = self.textbox.yview()[1] >= 0.99
         self.textbox.insert("end", f"{icon} {name[:34]:<35}", "cyan")
@@ -311,11 +344,15 @@ class TranslatorApp(ctk.CTk):
         self.textbox.configure(state="disabled")
 
     def set_status(self, text: str, progress: float | None) -> None:
+        if not self._ensure_ui_thread(self.set_status, text, progress):
+            return
         if progress is not None:
             self.progress.set(progress)
         self.lbl_status.configure(text=text)
 
     def _lock_ui(self, locked: bool) -> None:
+        if not self._ensure_ui_thread(self._lock_ui, locked):
+            return
         state = "disabled" if locked else "normal"
         rev = "normal" if locked else "disabled"
         self.btn_analyze.configure(state=state)
@@ -353,12 +390,16 @@ class TranslatorApp(ctk.CTk):
         self.job_state.is_paused = False
         self._clear_log()
         self._job = self._job_instance()
-        threading.Thread(target=self._run_analysis_thread, daemon=True).start()
+        options = self._translation_options()
+        threading.Thread(
+            target=lambda: self._run_analysis_thread(options),
+            daemon=True,
+        ).start()
 
-    def _run_analysis_thread(self) -> None:
+    def _run_analysis_thread(self, options: TranslationOptions) -> None:
         try:
             if self._job is not None:
-                self._job.run_analysis(self._translation_options())
+                self._job.run_analysis(options)
         finally:
             self.job_state.is_running = False
             self._job = None
@@ -377,7 +418,11 @@ class TranslatorApp(ctk.CTk):
         self.btn_pause.configure(text="⏸ ПАУЗА", fg_color="#ffc107", text_color="black")
         self._clear_log()
         self._job = self._job_instance()
-        threading.Thread(target=self._run_translation_thread, daemon=True).start()
+        options = self._translation_options()
+        threading.Thread(
+            target=lambda: self._run_translation_thread(options),
+            daemon=True,
+        ).start()
     
     
     def _open_log_file(self) -> None:
@@ -392,10 +437,10 @@ class TranslatorApp(ctk.CTk):
             self.log("❌ Лог-файл еще не создан.", "yellow")
             
             
-    def _run_translation_thread(self) -> None:
+    def _run_translation_thread(self, options: TranslationOptions) -> None:
         try:
             if self._job is not None:
-                self._job.run_translation(self._translation_options())
+                self._job.run_translation(options)
         finally:
             self.job_state.is_running = False
             self._job = None

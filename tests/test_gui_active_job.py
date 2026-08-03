@@ -1,4 +1,5 @@
 import os
+import queue
 import sys
 import tempfile
 import types
@@ -144,6 +145,19 @@ class TranslatorAppJobLifecycleTests(unittest.TestCase):
         app.job_state.stop.assert_called_once_with()
         app.btn_stop.configure.assert_called_once_with(state="disabled")
         app.btn_pause.configure.assert_called_once_with(state="disabled")
+
+    def test_worker_ui_update_is_queued_without_calling_tk(self) -> None:
+        app = object.__new__(gui_app.TranslatorApp)
+        app._ui_thread_id = -1
+        app._ui_queue = queue.Queue()
+        app.after = mock.Mock()
+
+        gui_app.TranslatorApp.set_status(app, "Working", 0.5)
+
+        callback, args = app._ui_queue.get_nowait()
+        self.assertEqual(callback, app.set_status)
+        self.assertEqual(args, ("Working", 0.5))
+        app.after.assert_not_called()
 
 
 if __name__ == "__main__":
