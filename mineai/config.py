@@ -1,7 +1,9 @@
 import configparser
+import io
 import os
 
 from mineai.constants import SETTINGS_FILE
+from mineai.io_utils import atomic_write_text
 
 
 class ConfigManager:
@@ -52,8 +54,9 @@ class ConfigManager:
             self.save()
 
     def save(self) -> None:
-        with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
-            self._config.write(f)
+        buffer = io.StringIO()
+        self._config.write(buffer)
+        atomic_write_text(SETTINGS_FILE, buffer.getvalue())
 
     def get(self, section: str, key: str) -> str:
         return self._config.get(section, key)

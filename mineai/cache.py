@@ -1,9 +1,11 @@
 import json
 import os
+import shutil
 import threading
 from typing import Callable
 
 from mineai.constants import CACHE_FILE_AI, CACHE_FILE_STD
+from mineai.io_utils import atomic_write_text
 from mineai.text_processing import polish_translation
 
 
@@ -26,7 +28,11 @@ class TranslationCache:
             try:
                 with open(self.filepath, encoding="utf-8") as f:
                     self._data = json.load(f)
-            except (json.JSONDecodeError, OSError):
+            except json.JSONDecodeError:
+                self._backup_corrupt_file()
+                self._data = {}
+                return 0
+            except OSError:
                 self._data = {}
                 return 0
 
@@ -69,9 +75,20 @@ class TranslationCache:
                 self._flush_unlocked()
 
     def _flush_unlocked(self) -> None:
-        with open(self.filepath, "w", encoding="utf-8") as f:
-            json.dump(self._data, f, ensure_ascii=False, indent=2)
+        payload = json.dumps(self._data, ensure_ascii=False, indent=2)
+        atomic_write_text(self.filepath, payload)
         self._dirty = False
+
+    def _backup_corrupt_file(self) -> None:
+        backup = self.filepath + ".corrupt"
+        counter = 1
+        while os.path.exists(backup):
+            backup = f"{self.filepath}.corrupt.{counter}"
+            counter += 1
+        try:
+            shutil.copy2(self.filepath, backup)
+        except OSError:
+            pass
 
 
 def load_both_caches() -> tuple[TranslationCache, TranslationCache, int]:

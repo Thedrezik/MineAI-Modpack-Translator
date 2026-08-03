@@ -3,6 +3,7 @@ import re
 from functools import lru_cache
 
 from mineai.constants import DICT_FILE, IGNORE_TERMS
+from mineai.io_utils import atomic_write_text
 
 
 PLACEHOLDER_PATTERN = re.compile(r"\[\s*#\s*(\d+)\s*#\s*\]")
@@ -42,8 +43,10 @@ def apply_smart_glue(text: str) -> str:
 def load_dictionary() -> dict[str, str]:
     if not __import__("os").path.exists(DICT_FILE):
         default = {"полуслой": "плита", "сыромятная медь": "сырая медь"}
-        with open(DICT_FILE, "w", encoding="utf-8") as f:
-            json.dump(default, f, ensure_ascii=False, indent=4)
+        atomic_write_text(
+            DICT_FILE,
+            json.dumps(default, ensure_ascii=False, indent=4),
+        )
         return default
     try:
         with open(DICT_FILE, encoding="utf-8") as f:

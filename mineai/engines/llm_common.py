@@ -7,6 +7,7 @@ from typing import Callable
 import requests
 
 from mineai.engines.base import EngineCallbacks, EngineItem, TranslationEngine
+from mineai.io_utils import atomic_write_text
 from mineai.text_processing import (
     PLACEHOLDER_PATTERN,
     polish_translation,
@@ -37,8 +38,8 @@ def load_prompts() -> dict[str, str]:
         return get_default_prompts()
 
 def save_prompts(prompts_dict: dict[str, str]) -> None:
-    with open(PROMPTS_FILE, "w", encoding="utf-8") as f:
-        json.dump(prompts_dict, f, ensure_ascii=False, indent=4)
+    payload = json.dumps(prompts_dict, ensure_ascii=False, indent=4)
+    atomic_write_text(PROMPTS_FILE, payload)
 
 
 def dump_ai_error(prompt: str, response: str, error_msg: str) -> None:

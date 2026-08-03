@@ -3,6 +3,7 @@ import os
 
 from mineai.engines.base import EngineCallbacks
 from mineai.engines.service import TranslationService
+from mineai.io_utils import atomic_write_bytes
 from mineai.json_utils import load_lenient_json
 from mineai.output.pack_writer import PackWriter
 from mineai.processors.locale_keys import collect_lang_keys_to_translate, count_translatable_lang_entries
@@ -79,5 +80,4 @@ class LooseJsonProcessor:
         if output_mode == "resourcepack" and pack_writer:
             pack_writer.write(tr_internal, payload)
         elif output_mode == "inplace":
-            with open(tr_disk, "wb") as f:
-                f.write(payload)
+            atomic_write_bytes(tr_disk, payload)

@@ -43,11 +43,7 @@ class PackWriter:
 
         dp_name = os.path.basename(self.rp_zip_path).replace(".zip", "_Datapack.zip")
         self.dp_zip_path = os.path.join(dp_dir, dp_name)
-        if os.path.exists(self.dp_zip_path):
-            try:
-                os.remove(self.dp_zip_path)
-            except OSError:
-                pass
+        self.dp_zip_path = self._unique_path(dp_dir, dp_name)
         self._create_zip(self.dp_zip_path, fmt["dp"], f"{dp_name} - MineAI")
         self.dp_handle = zipfile.ZipFile(self.dp_zip_path, "a", compression=zipfile.ZIP_DEFLATED)
 
@@ -56,17 +52,13 @@ class PackWriter:
         path = os.path.join(directory, filename)
         if not os.path.exists(path):
             return path
-        try:
-            os.remove(path)
-            return path
-        except OSError:
-            base, ext = os.path.splitext(filename)
-            counter = 1
-            while True:
-                candidate = os.path.join(directory, f"{base}_{counter}{ext}")
-                if not os.path.exists(candidate):
-                    return candidate
-                counter += 1
+        base, ext = os.path.splitext(filename)
+        counter = 1
+        while True:
+            candidate = os.path.join(directory, f"{base}_{counter}{ext}")
+            if not os.path.exists(candidate):
+                return candidate
+            counter += 1
 
     @staticmethod
     def _create_zip(path: str, pack_format: int, description: str) -> None:
