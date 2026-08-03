@@ -52,7 +52,13 @@ class BQProcessor:
         name = os.path.basename(os.path.dirname(file_path)) + "/" + os.path.basename(file_path)
         self.callbacks.on_log(f"⚡ Перевод BQ [{name}] — {len(strings_to_translate)} строк", "yellow")
         
-        translated = self.service.translate_dict(strings_to_translate, target_lang, self.callbacks, context=name)
+        translated = self.service.translate_dict(
+            strings_to_translate,
+            target_lang,
+            self.callbacks,
+            context=name,
+            prompt_type="quests",
+        )
         
         if not translated:
             return

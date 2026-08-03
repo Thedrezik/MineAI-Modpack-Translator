@@ -100,7 +100,7 @@ class TranslationService:
         if not pending or not callbacks.should_run():
             return result
 
-        engine = self._build_engine(context)
+        engine = self._build_engine(context, prompt_type)
         
         # --- НОВЫЙ АЛГОРИТМ РАЗБИЕНИЯ НА ПАЧКИ ПО СИМВОЛАМ ---
         is_ai = self.engine_name not in ("google", "deepl")  # <--- ИЗМЕНИЛИ ЭТУ СТРОКУ (теперь ИИ определяется правильно)
