@@ -1,5 +1,6 @@
 import json
 import os
+import re
 
 from mineai.engines.base import EngineCallbacks
 from mineai.engines.service import TranslationService
@@ -62,9 +63,13 @@ class LooseJsonProcessor:
 
         if pending:
             self.callbacks.on_log(f"⚡ Перевод {label} — {len(pending)} строк", "cyan")
-            # ДОБАВЛЕНО: prompt_type="books"
             translated = self.service.translate_dict(
-                pending, target_lang, self.callbacks, context="Локализация Квестов/Скриптов", prompt_type="books"
+                pending,
+                target_lang,
+                self.callbacks,
+                context="Локализация Квестов/Скриптов",
+                prompt_type="books",
+                scope=_scope_from_path(rel),
             )
             
             # --- НОВАЯ ПРОВЕРКА ОТМЕНЫ ---
@@ -81,3 +86,13 @@ class LooseJsonProcessor:
         elif output_mode == "inplace":
             with open(tr_disk, "wb") as f:
                 f.write(payload)
+
+
+def _scope_from_path(path: str) -> str:
+    normalized = path.replace("\\", "/")
+    match = re.search(r"(?:^|/)assets/([^/]+)/", normalized, re.IGNORECASE)
+    if match:
+        return match.group(1).lower()
+    if "ftbquests" in normalized.lower():
+        return "ftbquests"
+    return "kubejs" if "kubejs" in normalized.lower() else "unknown"

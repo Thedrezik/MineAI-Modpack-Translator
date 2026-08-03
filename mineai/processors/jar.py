@@ -25,6 +25,11 @@ from mineai.text_processing import (
 )
 
 
+def _scope_from_lang_path(path: str) -> str:
+    match = re.search(r"(?:^|/)assets/([^/]+)/", path.replace("\\", "/"), re.IGNORECASE)
+    return match.group(1).lower() if match else "unknown"
+
+
 class JarProcessor:
     def __init__(
         self,
@@ -162,7 +167,13 @@ class JarProcessor:
             return self._write_lang_output(merged, tr_path, output_mode, pack_writer, zout, written_inplace, item, en_data)
 
         self.callbacks.on_log(f"⚡ Перевод {mod_name} [Интерфейс] — {len(pending)} строк", "cyan")
-        translated = self.service.translate_dict(pending, target_lang, self.callbacks, context=mod_name)
+        translated = self.service.translate_dict(
+            pending,
+            target_lang,
+            self.callbacks,
+            context=mod_name,
+            scope=_scope_from_lang_path(item.filename),
+        )
         for key, value in translated.items():
             merged[key] = value
         self.state.increment_translated(len(translated))
@@ -240,7 +251,13 @@ class JarProcessor:
 
         if pending:
             self.callbacks.on_log(f"⚡ Перевод {mod_name} [Книга JSON] — {len(pending)} строк", "magenta")
-            translated = self.service.translate_dict(pending, target_lang, self.callbacks, context=mod_name)
+            translated = self.service.translate_dict(
+                pending,
+                target_lang,
+                self.callbacks,
+                context=mod_name,
+                scope=_scope_from_lang_path(item.filename),
+            )
             apply_translations_by_path(en_data, translated)
             self.state.increment_translated(len(translated))
 
@@ -340,7 +357,13 @@ class JarProcessor:
             return bool(pending)
 
         self.callbacks.on_log(f"⚡ Перевод {mod_name} [Книга MD] — {len(pending)} строк", "magenta")
-        translated = self.service.translate_dict(pending, target_lang, self.callbacks, context=mod_name)
+        translated = self.service.translate_dict(
+            pending,
+            target_lang,
+            self.callbacks,
+            context=mod_name,
+            scope=_scope_from_lang_path(item.filename),
+        )
         for idx_s, value in translated.items():
             idx = int(idx_s)
             if idx_s in title_meta:

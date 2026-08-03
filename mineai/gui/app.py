@@ -153,6 +153,23 @@ class TranslatorApp(ctk.CTk):
         ctk.CTkRadioButton(left, text="Пропуск (от 90%)", variable=self.var_mode, value="skip").pack(anchor="w", padx=20, pady=2)
         ctk.CTkRadioButton(left, text="С нуля (перезапись)", variable=self.var_mode, value="force").pack(anchor="w", padx=20, pady=2)
 
+        self.var_glossary = ctk.BooleanVar(
+            value=settings.getboolean("GENERAL", "smart_glossary")
+        )
+        ctk.CTkCheckBox(
+            left,
+            text="🧠 Умный глоссарий (только ru_ru)",
+            variable=self.var_glossary,
+            command=self._save_glossary_setting,
+        ).pack(anchor="w", padx=20, pady=(12, 2))
+        ctk.CTkLabel(
+            left,
+            text="Готовые термины + сбор из существующих переводов",
+            text_color="gray",
+            wraplength=300,
+            justify="left",
+        ).pack(anchor="w", padx=42, pady=(0, 2))
+
         self.btn_analyze = ctk.CTkButton(
             left, text="Анализ сборки", fg_color="#0066cc", hover_color="#004c99", command=self._start_analysis
         )
@@ -253,7 +270,11 @@ class TranslatorApp(ctk.CTk):
             translate_mods=self.var_mods.get(),
             translate_books=self.var_books.get(),
             translate_quests=self.var_quests.get(),
+            use_glossary=self.var_glossary.get(),
         )
+
+    def _save_glossary_setting(self) -> None:
+        settings.set("GENERAL", "smart_glossary", str(self.var_glossary.get()))
 
     def _open_settings(self) -> None:
         SettingsWindow(self, settings, self._refresh_folder_label)

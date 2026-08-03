@@ -34,6 +34,7 @@ You don't need to install Python or mess with code! You can download the ready-t
 * 🛡️ **Format Protection (Titanium Shield):** Smart regular expressions protect macros `$(#AE)`, tags `<item:minecraft:dirt>`, Markdown links `](url)`, and YAML headers (`---`) from being corrupted by the translator.
 * 🛠️ **Auto-Fix Cache:** Machine translators often make mistakes (e.g., adding spaces in variables: `% s` instead of `%s`). On every run, the program scans its cache and **automatically fixes** broken brackets, links, and variables, ensuring perfect formatting.
 * 📖 **Custom Dictionary (`dictionary.json`):** The program automatically generates a dictionary file. If the translator stubbornly translates "Raw Copper" incorrectly, just add a rule to the dictionary, and the script will automatically replace it throughout the entire modpack!
+* 🧠 **Smart Glossary (`ru_ru`):** Preserves approved mod terminology and learns conservative term pairs from existing `en_us.json` ↔ `ru_ru.json` files before translation. User rules override generated and bundled terms.
 * 🧠 **Local AI Support:** Integration with KoboldCPP for translating text while preserving game lore and context.
 * ☁️ **Cloud AI via OpenRouter:** Connect elite neural networks (like Qwen, Claude, or GPT) in one click without using your video card.
 * ⚡ **High Speed:** When using Google Translate, the program sends requests in batches using multi-threading, translating thousands of lines in minutes.
@@ -140,6 +141,14 @@ If you modified the code and want to build your own executable without a console
 
 The compiled standalone app will appear in the `dist/` folder as `MineAI_Translator.exe`.
 
+### Smart glossary / Умный глоссарий
+
+The first version is intentionally available only for `ru_ru`. Enable the
+**🧠 Smart Glossary** checkbox to load bundled and user terminology, harvest
+short terms from existing locale pairs, and isolate cache entries by glossary
+fingerprint. See [`docs/GLOSSARIES_RU.md`](docs/GLOSSARIES_RU.md) for the schema,
+conflict rules, and examples.
+
 ---
 ---
 
@@ -155,6 +164,7 @@ The compiled standalone app will appear in the `dist/` folder as `MineAI_Transla
 * 🛠️ **Самолечение кэша (Auto-Fix):** Машинные переводчики часто ошибаются (ставят пробелы в переменных: `% s` вместо `%s`). При каждом запуске программа сканирует свой кэш и **автоматически чинит** сломанные скобки, ссылки и переменные.
 
 * 📖 **Пользовательский словарь (`dictionary.json`):** Если переводчик упорно переводит "Raw Copper" как "Сыромятная медь", просто добавьте правило в созданный словарь, и скрипт заменит всё на "Сырая медь" во всей сборке!
+* 🧠 **Умный глоссарий (`ru_ru`):** Применяет утверждённые термины ко всем движкам и до запуска перевода собирает безопасные пары из существующих `en_us.json` ↔ `ru_ru.json`. Ручные правила имеют высший приоритет.
 * 🧠 **Локальные Нейросети:** Интеграция с KoboldCPP для перевода текста с полным сохранением игрового лора и контекста.
 * ☁️ **Облачный ИИ через OpenRouter:** Подключайте топовые нейросети (Qwen, Claude, GPT) в один клик без нагрузки на собственную видеокарту!
 * ⚡ **Высокая скорость:** Многопоточный Google Translate отправляет запросы пачками, переводя тысячи строк за считанные минуты.
