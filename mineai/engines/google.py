@@ -69,8 +69,6 @@ class GoogleEngine(TranslationEngine):
                 key, raw = fut.result()
                 if raw:
                     result[key] = self._finalize(raw, items[key])
-                else:
-                    result[key] = items[key].original
         return result
 
     def _translate_batch_mode(
@@ -117,8 +115,7 @@ class GoogleEngine(TranslationEngine):
                 else:
                     for key in chunk_keys:
                         single = self._request(items[key].masked, api_code, timeout=5)
-                        result[key] = (
-                            self._finalize(single, items[key]) if single else items[key].original
-                        )
+                        if single:
+                            result[key] = self._finalize(single, items[key])
                         time.sleep(0.3)
         return result

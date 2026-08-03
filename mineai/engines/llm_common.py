@@ -64,6 +64,8 @@ def build_translation_prompt(
     prompts = load_prompts()
     intro_template = prompts.get(prompt_type, get_default_prompts()["mods"])
     intro = intro_template.replace("{lang_name}", lang_name).replace("{context}", context)
+    if mode == "context" and context and "{context}" not in intro_template:
+        intro += f"\nContext: {context}. Preserve the terminology and lore of this source."
     
     # Подтягиваем технические правила из файла
     tech_rules = prompts.get("technical", get_default_prompts()["technical"])
@@ -152,7 +154,7 @@ class BatchLlmEngine(TranslationEngine):
 
                 callbacks.on_log(
                     f"🔁 {self.label}: повтор {retry_number}/"
-                    f"{len(RETRY_BATCH_SIZES)} — {len(failed)} строк",
+                    f"{len(active_retries)} — {len(failed)} строк",
                     "yellow",
                 )
                 retry_failed: list[str] = []

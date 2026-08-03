@@ -37,7 +37,7 @@ def callbacks(
 
 
 def prompt_payload(prompt: str) -> dict[str, str]:
-    for marker in ("Data: ", "Данные: "):
+    for marker in ("DATA:\n", "Data: ", "Данные: "):
         if marker in prompt:
             return json.loads(prompt.split(marker, 1)[1])
     raise AssertionError("Prompt does not contain a JSON payload marker")
@@ -67,7 +67,7 @@ class ServiceWithEngine(TranslationService):
         super().__init__("ai", cache, ConfigWithoutSmartGlue())
         self.engine = engine
 
-    def _build_engine(self, context: str = "") -> BatchLlmEngine:
+    def _build_engine(self, context: str = "", prompt_type: str = "mods") -> BatchLlmEngine:
         return self.engine
 
 
@@ -91,8 +91,8 @@ class BatchLlmEngineTests(unittest.TestCase):
             context="Example Mod",
         )
 
-        self.assertIn("Все маркеры вида [#N#]", prompt)
-        self.assertIn("не удаляй, не добавляй, не дублируй", prompt)
+        self.assertIn("every [#N#] placeholder", prompt)
+        self.assertIn("Context: Example Mod", prompt)
 
     def test_retries_only_a_missing_key(self) -> None:
         calls: list[dict[str, str]] = []

@@ -108,7 +108,7 @@ class SettingsWindow(ctk.CTkToplevel):
         )
         self.lbl_retries.pack(anchor="w", padx=10)
         self.slider_retries = ctk.CTkSlider(
-            tab_gen, from_=0, to=5, number_of_steps=5,
+            tab_gen, from_=0, to=3, number_of_steps=3,
             command=lambda v: self.lbl_retries.configure(text=f"Повторы ИИ при ошибке: {int(v)}" if int(v) > 0 else "Повторы ИИ при ошибке: Отключены")
         )
         self.slider_retries.set(retries_val)

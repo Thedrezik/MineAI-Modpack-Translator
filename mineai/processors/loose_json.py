@@ -62,9 +62,13 @@ class LooseJsonProcessor:
 
         if pending:
             self.callbacks.on_log(f"⚡ Перевод {label} — {len(pending)} строк", "cyan")
-            # ДОБАВЛЕНО: prompt_type="books"
+            prompt_type = "quests" if "quest" in rel.lower() else "mods"
             translated = self.service.translate_dict(
-                pending, target_lang, self.callbacks, context="Локализация Квестов/Скриптов", prompt_type="books"
+                pending,
+                target_lang,
+                self.callbacks,
+                context=label,
+                prompt_type=prompt_type,
             )
             
             # --- НОВАЯ ПРОВЕРКА ОТМЕНЫ ---
