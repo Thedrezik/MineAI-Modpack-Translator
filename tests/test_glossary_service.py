@@ -56,7 +56,9 @@ class GlossaryServiceTests(unittest.TestCase):
                 FakeConfig(),
                 glossary=glossary,
             )
-            service._build_engine = lambda _context="": EchoTranslationEngine()
+            service._build_engine = (
+                lambda _context="", _prompt_type="mods": EchoTranslationEngine()
+            )
 
             exact = service.translate_dict(
                 {"a": "Pin"},
@@ -82,7 +84,9 @@ class GlossaryServiceTests(unittest.TestCase):
             cache = TranslationCache(str(Path(temp) / "cache.json"))
             cache.set("ru", "Pin", "Из старого кэша")
             service = TranslationService("google", cache, FakeConfig())
-            service._build_engine = lambda _context="": EchoTranslationEngine()
+            service._build_engine = (
+                lambda _context="", _prompt_type="mods": EchoTranslationEngine()
+            )
 
             result = service.translate_dict(
                 {"a": "Pin"},
