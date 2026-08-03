@@ -20,9 +20,7 @@ class SnbtProcessor:
         
         # Шаг 1. Определяем, куда сохранять и откуда читать
         if is_lang_file:
-            # Превращаем код API (ru) в код майнкрафта (ru_ru)
-            api_code = target_lang.get("api", "ru").lower()
-            mc_code = target_lang.get("code", f"{api_code}_{api_code}")
+            mc_code = target_lang["file"]
             target_file_path = os.path.join(os.path.dirname(file_path), f"{mc_code}.snbt")
             
             # Для en_us мы всегда берем оригинал как шаблон, он не должен меняться

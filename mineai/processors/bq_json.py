@@ -43,7 +43,7 @@ class BQProcessor:
                     actual_key = next((k for k in bq_data if k.startswith(key_prefix)), None)
                     if actual_key and isinstance(bq_data[actual_key], str):
                         text = bq_data[actual_key].strip()
-                        if text and not already_translated(text, target_regex):
+                        if text and (mode == "force" or not already_translated(text, target_regex)):
                             strings_to_translate[actual_key] = text
 
         if not strings_to_translate:
@@ -52,9 +52,14 @@ class BQProcessor:
         name = os.path.basename(os.path.dirname(file_path)) + "/" + os.path.basename(file_path)
         self.callbacks.on_log(f"⚡ Перевод BQ [{name}] — {len(strings_to_translate)} строк", "yellow")
         
-        translated = self.service.translate_dict(strings_to_translate, target_lang, self.callbacks, context=name)
+        translated = self.service.translate_dict(
+            strings_to_translate,
+            target_lang,
+            self.callbacks,
+            context=name,
+        )
         
-        if not translated:
+        if not self.state.should_run() or not translated:
             return
 
         # Применяем перевод
