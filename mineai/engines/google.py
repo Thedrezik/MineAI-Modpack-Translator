@@ -69,10 +69,16 @@ class GoogleEngine(TranslationEngine):
                 callbacks.wait_if_paused()
                 if not callbacks.should_run():
                     break
-                key, raw = fut.result()
-                if raw:
-                    result[key] = self._finalize(raw, items[key])
-                else:
+                key = futures[fut]
+                try:
+                    _, raw = fut.result()
+                    if raw:
+                        result[key] = self._finalize(raw, items[key])
+                    else:
+                        result[key] = items[key].original
+                except Exception as exc:
+                    logger.exception("Google Translate item failed: %s", key)
+                    callbacks.on_log(f"❌ Ошибка Google для строки {key}: {exc}", "red")
                     result[key] = items[key].original
         return result
 
@@ -108,20 +114,44 @@ class GoogleEngine(TranslationEngine):
             return chunk_keys, None
 
         with ThreadPoolExecutor(max_workers=self.workers) as pool:
-            futures = [pool.submit(translate_chunk, ck, ct) for ck, ct in chunks]
+            futures = {
+                pool.submit(translate_chunk, chunk_keys, text): chunk_keys
+                for chunk_keys, text in chunks
+            }
             for fut in as_completed(futures):
                 callbacks.wait_if_paused()
                 if not callbacks.should_run():
                     break
-                chunk_keys, parts = fut.result()
+                chunk_keys = futures[fut]
+                try:
+                    _, parts = fut.result()
+                except Exception as exc:
+                    logger.exception("Google Translate batch failed")
+                    callbacks.on_log(
+                        f"❌ Ошибка пакета Google ({len(chunk_keys)} строк): {exc}",
+                        "red",
+                    )
+                    parts = None
+
                 if parts:
                     for idx, key in enumerate(chunk_keys):
                         result[key] = self._finalize(parts[idx].strip(), items[key])
-                else:
-                    for key in chunk_keys:
+                    continue
+
+                for key in chunk_keys:
+                    try:
                         single = self._request(items[key].masked, api_code, timeout=5)
                         result[key] = (
-                            self._finalize(single, items[key]) if single else items[key].original
+                            self._finalize(single, items[key])
+                            if single
+                            else items[key].original
                         )
-                        time.sleep(0.3)
+                    except Exception as exc:
+                        logger.exception("Google Translate fallback item failed: %s", key)
+                        callbacks.on_log(
+                            f"❌ Ошибка Google для строки {key}: {exc}",
+                            "red",
+                        )
+                        result[key] = items[key].original
+                    time.sleep(0.3)
         return result
