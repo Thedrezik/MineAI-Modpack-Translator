@@ -1,9 +1,14 @@
+import logging
 import time
 
 import requests
 
 from mineai.engines.base import EngineCallbacks, EngineItem, TranslationEngine
+from mineai.engines.http_retry import request_with_retry
 from mineai.text_processing import polish_translation, unmask_translation
+
+
+logger = logging.getLogger(__name__)
 
 
 class DeepLEngine(TranslationEngine):
@@ -29,22 +34,25 @@ class DeepLEngine(TranslationEngine):
                 break
             chunk_keys = keys[i : i + 40]
             try:
-                response = requests.post(
-                    self.url,
-                    headers={"Authorization": f"DeepL-Auth-Key {self.api_key}"},
-                    json={
-                        "text": [items[k].masked for k in chunk_keys],
-                        "target_lang": target_lang["deepl"],
-                    },
-                    timeout=60,
+                response = request_with_retry(
+                    lambda: requests.post(
+                        self.url,
+                        headers={"Authorization": f"DeepL-Auth-Key {self.api_key}"},
+                        json={
+                            "text": [items[k].masked for k in chunk_keys],
+                            "target_lang": target_lang["deepl"],
+                        },
+                        timeout=60,
+                    ),
+                    operation="DeepL request",
                 )
-                response.raise_for_status()
                 translations = response.json()["translations"]
                 for idx, key in enumerate(chunk_keys):
                     raw = translations[idx]["text"]
                     raw = unmask_translation(raw, items[key].mapping)
                     result[key] = polish_translation(raw)
-            except (requests.RequestException, KeyError, IndexError) as exc:
+            except (requests.RequestException, KeyError, IndexError, TypeError, ValueError) as exc:
+                logger.exception("DeepL batch failed")
                 callbacks.on_log(f"❌ Ошибка DeepL: {exc}", "red")
                 for key in chunk_keys:
                     result[key] = items[key].original

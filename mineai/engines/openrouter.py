@@ -1,8 +1,13 @@
-import time
+import logging
+
 import requests
 
 from mineai.constants import OPENROUTER_API
+from mineai.engines.http_retry import request_with_retry
 from mineai.engines.llm_common import BatchLlmEngine
+
+
+logger = logging.getLogger(__name__)
 
 
 class OpenRouterEngine(BatchLlmEngine):
@@ -45,13 +50,8 @@ class OpenRouterEngine(BatchLlmEngine):
         return headers
 
     def _request(self, prompt: str, max_tokens: int) -> str | None:
-        max_retries = 3
-        base_delay = 4  # Базовая пауза в 4 секунды между запросами для бесплатных ИИ
-
-        for attempt in range(max_retries):
-            if attempt > 0:
-                time.sleep(base_delay)
-            response = requests.post(
+        response = request_with_retry(
+            lambda: requests.post(
                 self.api_url,
                 headers=self._headers(),
                 json={
@@ -61,27 +61,15 @@ class OpenRouterEngine(BatchLlmEngine):
                     "max_tokens": max_tokens,
                 },
                 timeout=300,
-            )
-            
-            # Если словили лимит (429), ждем дольше и пробуем снова
-            if response.status_code == 429:
-                wait_time = 15 * (attempt + 1)
-                print(f"\n[OpenRouter] Поймали лимит 429. Ждем {wait_time} сек. (Попытка {attempt + 1}/{max_retries})...")
-                time.sleep(wait_time)
-                continue
-
-            if not response.ok:
-                detail = response.text[:200] if response.text else response.reason
-                raise requests.HTTPError(f"{response.status_code}: {detail}", response=response)
-            
-            data = response.json()
-            content = data.get("choices", [{}])[0].get("message", {}).get("content")
-            
-            if content is None:
-                print("\n[Предупреждение] OpenRouter вернул пустой ответ (возможно, сработал фильтр модели).")
-                return None
-                
-            return content.strip()
-            
-        print("\n[Ошибка] Не удалось получить ответ: бесплатная модель слишком перегружена.")
-        return None
+            ),
+            operation="OpenRouter request",
+        )
+        try:
+            content = response.json()["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError, ValueError) as exc:
+            logger.error("OpenRouter returned an invalid response: %s", exc)
+            return None
+        if not isinstance(content, str) or not content.strip():
+            logger.warning("OpenRouter returned an empty response")
+            return None
+        return content.strip()

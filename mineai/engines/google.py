@@ -1,3 +1,4 @@
+import logging
 import re
 import time
 
@@ -5,7 +6,11 @@ import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from mineai.engines.base import EngineCallbacks, EngineItem, TranslationEngine
+from mineai.engines.http_retry import request_with_retry
 from mineai.text_processing import polish_translation, unmask_translation
+
+
+logger = logging.getLogger(__name__)
 
 
 class GoogleEngine(TranslationEngine):
@@ -17,21 +22,19 @@ class GoogleEngine(TranslationEngine):
         self.mode = mode
 
     def _request(self, text: str, api_code: str, timeout: int = 10) -> str | None:
-        for _ in range(3):
-            try:
-                r = requests.get(
-                    self.API_URL,
-                    params={"client": "gtx", "sl": "en", "tl": api_code, "dt": "t", "q": text},
-                    timeout=timeout,
-                )
-                if r.status_code == 429:
-                    time.sleep(3)
-                    continue
-                if r.ok:
-                    return "".join(part[0] for part in r.json()[0] if part[0])
-            except (requests.RequestException, KeyError, IndexError, ValueError):
-                time.sleep(1)
-        return None
+        response = request_with_retry(
+            lambda: requests.get(
+                self.API_URL,
+                params={"client": "gtx", "sl": "en", "tl": api_code, "dt": "t", "q": text},
+                timeout=timeout,
+            ),
+            operation="Google Translate request",
+        )
+        try:
+            return "".join(part[0] for part in response.json()[0] if part[0])
+        except (KeyError, IndexError, TypeError, ValueError) as exc:
+            logger.error("Google Translate returned an invalid response: %s", exc)
+            return None
 
     def _finalize(self, raw: str, item: EngineItem) -> str:
         text = unmask_translation(raw, item.mapping)
