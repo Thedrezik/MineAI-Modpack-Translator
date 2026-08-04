@@ -12,11 +12,12 @@ from mineai.engines.openrouter import OpenRouterEngine
 
 
 class FakeResponse:
-    def __init__(self, status_code: int, payload=None, text: str = "") -> None:
+    def __init__(self, status_code: int, payload=None, text: str = "", headers=None) -> None:
         self.status_code = status_code
         self._payload = payload
         self.text = text
         self.reason = text or f"HTTP {status_code}"
+        self.headers = headers or {}
 
     def raise_for_status(self) -> None:
         if self.status_code >= 400:
@@ -85,6 +86,20 @@ class HttpRetryTests(unittest.TestCase):
         request.assert_called_once_with()
         sleep.assert_not_called()
 
+    def test_respects_retry_after_header(self) -> None:
+        responses = iter([FakeResponse(429, headers={"Retry-After": "12"}), FakeResponse(200)])
+        notices = []
+        with mock.patch("mineai.engines.http_retry.time.sleep") as sleep:
+            response = request_with_retry(
+                lambda: next(responses),
+                operation="test request",
+                rate_limit_delays=(15.0, 30.0, 45.0),
+                on_retry=notices.append,
+            )
+        self.assertEqual(response.status_code, 200)
+        sleep.assert_called_once_with(12.0)
+        self.assertTrue(any("повтор через 12.0" in message for message in notices))
+
 
 class EngineRetryIntegrationTests(unittest.TestCase):
     def test_google_retries_timeout(self) -> None:
@@ -144,7 +159,22 @@ class EngineRetryIntegrationTests(unittest.TestCase):
             result = engine._request("prompt", 100)
 
         self.assertEqual(result, "translated")
-        sleep.assert_called_once_with(1.0)
+        sleep.assert_called_once_with(15.0)
+
+    def test_openrouter_uses_long_backoff_for_repeated_429(self) -> None:
+        engine = OpenRouterEngine(api_key="secret", model="model")
+        success = FakeResponse(200, payload={"choices": [{"message": {"content": "translated"}}]})
+        notices = []
+        engine._on_log = lambda message, tag: notices.append((message, tag))
+        with (
+            mock.patch("mineai.engines.openrouter.requests.post", side_effect=[FakeResponse(429), FakeResponse(429), FakeResponse(429), success]),
+            mock.patch("mineai.engines.http_retry.time.sleep") as sleep,
+        ):
+            result = engine._request("prompt", 100)
+        self.assertEqual(result, "translated")
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [15.0, 30.0, 45.0])
+        self.assertEqual(len(notices), 3)
+        self.assertTrue(all(tag == "yellow" for _message, tag in notices))
 
     def test_kobold_retries_5xx(self) -> None:
         engine = KoboldEngine()

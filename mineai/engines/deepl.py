@@ -45,6 +45,7 @@ class DeepLEngine(TranslationEngine):
                         timeout=60,
                     ),
                     operation="DeepL request",
+                    on_retry=lambda message: callbacks.on_log(f"⚠️ {message}", "yellow"),
                 )
                 translations = response.json()["translations"]
                 for idx, key in enumerate(chunk_keys):

@@ -20,6 +20,8 @@ class GoogleEngine(TranslationEngine):
     def __init__(self, workers: int = 5, mode: str = "single") -> None:
         self.workers = max(1, min(workers, 10))
         self.mode = mode
+        self._on_retry = None
+        self._on_log = None
 
     def _request(self, text: str, api_code: str, timeout: int = 10) -> str | None:
         response = request_with_retry(
@@ -29,11 +31,14 @@ class GoogleEngine(TranslationEngine):
                 timeout=timeout,
             ),
             operation="Google Translate request",
+            on_retry=self._on_retry,
         )
         try:
             return "".join(part[0] for part in response.json()[0] if part[0])
         except (KeyError, IndexError, TypeError, ValueError) as exc:
             logger.error("Google Translate returned an invalid response: %s", exc)
+            if self._on_log is not None:
+                self._on_log(f"⚠️ Google вернул некорректный ответ ({exc})", "yellow")
             return None
 
     def _finalize(self, raw: str, item: EngineItem) -> str:
@@ -48,10 +53,16 @@ class GoogleEngine(TranslationEngine):
     ) -> dict[str, str]:
         if not items:
             return {}
-        api_code = target_lang["api"]
-        if self.mode == "batch":
-            return self._translate_batch_mode(items, api_code, callbacks)
-        return self._translate_single_mode(items, api_code, callbacks)
+        self._on_retry = lambda message: callbacks.on_log(f"⚠️ {message}", "yellow")
+        self._on_log = callbacks.on_log
+        try:
+            api_code = target_lang["api"]
+            if self.mode == "batch":
+                return self._translate_batch_mode(items, api_code, callbacks)
+            return self._translate_single_mode(items, api_code, callbacks)
+        finally:
+            self._on_retry = None
+            self._on_log = None
 
     def _translate_single_mode(
         self, items: dict[str, EngineItem], api_code: str, callbacks: EngineCallbacks
