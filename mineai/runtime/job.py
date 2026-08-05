@@ -1,4 +1,3 @@
-import time
 import traceback
 from dataclasses import dataclass
 
@@ -63,7 +62,10 @@ class TranslationJob:
             should_run=self.state.should_run,
             wait_if_paused=self.state.wait_if_paused,
             on_log=self.on_log,
-            on_status=lambda msg: self.on_status(self.state.get_full_status(msg), None),
+            on_status=lambda msg: self.on_status(
+                self.state.get_full_status(msg),
+                None,
+            ),
             on_progress=self.state.increment_translated,
         )
 
@@ -153,120 +155,173 @@ class TranslationJob:
             self.on_log(f"🌐 OpenRouter: {model}", "cyan")
 
         pack_writer: PackWriter | None = None
-        if options.output_mode == "resourcepack":
-            pack_writer = PackWriter(
-                options.mc_dir,
-                options.pack_name,
-                options.mc_version,
-                lang["name"],
-            )
-            self.on_log(f"📦 Ресурспак: {pack_writer.rp_zip_path}", "cyan")
-            self.on_log(f"📂 Датапак: {pack_writer.dp_zip_path}", "magenta")
-
-        service = TranslationService(
-            options.engine,
-            cache,
-            self.config,
-            google_mode=options.google_mode,
-            ai_mode=options.ai_mode,
-            ai_batch=options.ai_batch,
-            ai_provider=options.ai_provider,
-        )
-        callbacks = self._callbacks()
-        jar_proc = JarProcessor(service, self.state, callbacks)
-        loose_proc = LooseJsonProcessor(service, self.state, callbacks)
-        snbt_proc = SnbtProcessor(service, self.state, callbacks)
-        bq_proc = BQProcessor(service, self.state, callbacks)
-
-        self.state.begin_progress()
-        self.on_log(f"🚀 ЗАПУСК ПЕРЕВОДА ({lang['name']})...\n", "yellow")
-
+        failed = False
+        failed_files = 0
         total_items = len(jars) + len(loose) + len(snbt) + len(bq_files)
         done = 0
 
-        failed = False
+        def process_file(path: str, file_type: str, action) -> None:
+            nonlocal done, failed_files
+            try:
+                action()
+            except Exception:
+                failed_files += 1
+                self.on_log(
+                    f"\n❌ Ошибка файла {path}:\n{traceback.format_exc()}",
+                    "red",
+                )
+            finally:
+                done += 1
+                self.state.update_file_progress(file_type, done, total_items)
+                self.on_status(
+                    self.state.get_full_status(),
+                    self.state.line_progress(),
+                )
+
         try:
+            if options.output_mode == "resourcepack":
+                pack_writer = PackWriter(
+                    options.mc_dir,
+                    options.pack_name,
+                    options.mc_version,
+                    lang["name"],
+                )
+                self.on_log(f"📦 Ресурспак: {pack_writer.rp_zip_path}", "cyan")
+                self.on_log(f"📂 Датапак: {pack_writer.dp_zip_path}", "magenta")
+
+            service = TranslationService(
+                options.engine,
+                cache,
+                self.config,
+                google_mode=options.google_mode,
+                ai_mode=options.ai_mode,
+                ai_batch=options.ai_batch,
+                ai_provider=options.ai_provider,
+            )
+            callbacks = self._callbacks()
+            jar_proc = JarProcessor(service, self.state, callbacks)
+            loose_proc = LooseJsonProcessor(service, self.state, callbacks)
+            snbt_proc = SnbtProcessor(service, self.state, callbacks)
+            bq_proc = BQProcessor(service, self.state, callbacks)
+
+            self.state.begin_progress()
+            self.on_log(f"🚀 ЗАПУСК ПЕРЕВОДА ({lang['name']})...\n", "yellow")
+
             for path in jars:
                 if not self.state.should_run():
                     break
                 self.state.wait_if_paused()
-                jar_proc.process(
+                if not self.state.should_run():
+                    break
+                process_file(
                     path,
-                    target_lang=lang,
-                    mode=options.process_mode,
-                    output_mode=options.output_mode,
-                    translate_mods=options.translate_mods,
-                    translate_books=options.translate_books,
-                    pack_writer=pack_writer,
-                )
-                done += 1
-                self.state.update_file_progress("Моды", done, total_items)
-                self.on_status(
-                    self.state.get_full_status(),
-                    self.state.line_progress(),
+                    "Моды",
+                    lambda path=path: jar_proc.process(
+                        path,
+                        target_lang=lang,
+                        mode=options.process_mode,
+                        output_mode=options.output_mode,
+                        translate_mods=options.translate_mods,
+                        translate_books=options.translate_books,
+                        pack_writer=pack_writer,
+                    ),
                 )
 
             for path in loose:
                 if not self.state.should_run():
                     break
                 self.state.wait_if_paused()
-                loose_proc.process(
+                if not self.state.should_run():
+                    break
+                process_file(
                     path,
-                    options.mc_dir,
-                    target_lang=lang,
-                    mode=options.process_mode,
-                    output_mode=options.output_mode,
-                    pack_writer=pack_writer,
-                )
-                done += 1
-                self.state.update_file_progress("Словари", done, total_items)
-                self.on_status(
-                    self.state.get_full_status(),
-                    self.state.line_progress(),
+                    "Словари",
+                    lambda path=path: loose_proc.process(
+                        path,
+                        options.mc_dir,
+                        target_lang=lang,
+                        mode=options.process_mode,
+                        output_mode=options.output_mode,
+                        pack_writer=pack_writer,
+                    ),
                 )
 
             for path in snbt:
                 if not self.state.should_run():
                     break
                 self.state.wait_if_paused()
-                snbt_proc.process(path, target_lang=lang, mode=options.process_mode)
-                done += 1
-                self.state.update_file_progress("Квесты", done, total_items)
-                self.on_status(
-                    self.state.get_full_status(),
-                    self.state.line_progress(),
+                if not self.state.should_run():
+                    break
+                process_file(
+                    path,
+                    "Квесты",
+                    lambda path=path: snbt_proc.process(
+                        path,
+                        target_lang=lang,
+                        mode=options.process_mode,
+                    ),
                 )
 
             for path in bq_files:
                 if not self.state.should_run():
                     break
                 self.state.wait_if_paused()
-                bq_proc.process(path, target_lang=lang, mode=options.process_mode)
-                done += 1
-                self.state.update_file_progress("BQ", done, total_items)
-                self.on_status(
-                    self.state.get_full_status(),
-                    self.state.line_progress(),
+                if not self.state.should_run():
+                    break
+                process_file(
+                    path,
+                    "BQ",
+                    lambda path=path: bq_proc.process(
+                        path,
+                        target_lang=lang,
+                        mode=options.process_mode,
+                    ),
                 )
-
-            cache.save()
         except Exception:
             failed = True
-            self.on_log(f"\n❌ КРИТИЧЕСКАЯ ОШИБКА:\n{traceback.format_exc()}", "red")
+            self.on_log(
+                f"\n❌ КРИТИЧЕСКАЯ ОШИБКА:\n{traceback.format_exc()}",
+                "red",
+            )
         finally:
+            try:
+                cache.save()
+            except Exception:
+                failed = True
+                self.on_log(
+                    f"\n❌ Не удалось сохранить кэш:\n{traceback.format_exc()}",
+                    "red",
+                )
+
             if pack_writer:
-                pack_writer.close()
+                try:
+                    pack_writer.close()
+                except Exception:
+                    failed = True
+                    self.on_log(
+                        f"\n❌ Не удалось завершить выходные архивы:\n"
+                        f"{traceback.format_exc()}",
+                        "red",
+                    )
+            # AI-сервер (KoboldCPP) остаётся запущенным для последующих задач.
 
         if failed:
             self.on_status("Ошибка перевода", 1.0)
         elif not self.state.should_run():
             self.on_log("\n🛑 ОСТАНОВЛЕНО.", "red")
             self.on_status("Остановлено", 1.0)
+        elif failed_files:
+            self.on_log(
+                f"\n⚠️ ЗАВЕРШЕНО С ОШИБКАМИ: пропущено файлов — {failed_files}.",
+                "yellow",
+            )
+            self.on_status("Завершено с ошибками", 1.0)
         else:
             self.on_log("\n✅ ПЕРЕВОД УСПЕШНО ЗАВЕРШЕН!", "green")
             if options.output_mode == "resourcepack":
                 self.on_log("💡 Включите ресурспак и датапак в игре.", "yellow")
             self.on_status("Все задачи выполнены!", 1.0)
+
 
     def stop(self) -> None:
         self.state.stop()

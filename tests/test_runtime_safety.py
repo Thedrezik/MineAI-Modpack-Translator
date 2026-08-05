@@ -75,9 +75,10 @@ class RuntimeSafetyTests(unittest.TestCase):
         ):
             job.run_translation(options)
 
-        self.assertTrue(any("КРИТИЧЕСКАЯ ОШИБКА" in message for message in logs))
+        self.assertTrue(any("broken.json" in message for message in logs))
+        self.assertTrue(any("ЗАВЕРШЕНО С ОШИБКАМИ" in message for message in logs))
         self.assertFalse(any("УСПЕШНО ЗАВЕРШЕН" in message for message in logs))
-        self.assertEqual(statuses[-1], ("Ошибка перевода", 1.0))
+        self.assertEqual(statuses[-1], ("Завершено с ошибками", 1.0))
 
 
 if __name__ == "__main__":
