@@ -55,11 +55,27 @@ class TranslatorAppJobLifecycleTests(unittest.TestCase):
     def _bare_app():
         app = object.__new__(gui_app.TranslatorApp)
         app._job = None
-        app.job_state = SimpleNamespace(
-            is_running=False,
-            is_paused=False,
-            stop=mock.Mock(),
-        )
+        state = SimpleNamespace(is_running=False, is_paused=False)
+
+        def start() -> None:
+            state.is_running = True
+            state.is_paused = False
+
+        def finish() -> None:
+            state.is_running = False
+            state.is_paused = False
+
+        def toggle_pause() -> bool:
+            if not state.is_running:
+                return False
+            state.is_paused = not state.is_paused
+            return state.is_paused
+
+        state.start = mock.Mock(side_effect=start)
+        state.finish = mock.Mock(side_effect=finish)
+        state.stop = mock.Mock(side_effect=finish)
+        state.toggle_pause = mock.Mock(side_effect=toggle_pause)
+        app.job_state = state
         app._lock_ui = mock.Mock()
         app._clear_log = mock.Mock()
         app._translation_options = mock.Mock(return_value=object())
