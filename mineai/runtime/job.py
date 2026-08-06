@@ -1,3 +1,5 @@
+import threading
+import time
 import traceback
 from dataclasses import dataclass
 
@@ -37,6 +39,8 @@ class TranslationOptions:
 
 
 class TranslationJob:
+    PROGRESS_STATUS_INTERVAL_SECONDS = 0.4
+
     def __init__(
         self,
         config: ConfigManager,
@@ -56,6 +60,30 @@ class TranslationJob:
         self.on_status = on_status
         self.on_row = on_row
         self.ai_launcher = AiLauncher(config)
+        self._progress_status_lock = threading.Lock()
+        self._last_progress_status_at = 0.0
+
+    def _reset_progress_status_throttle(self) -> None:
+        with self._progress_status_lock:
+            self._last_progress_status_at = 0.0
+
+    def _on_progress(self, count: int = 1) -> None:
+        self.state.increment_translated(count)
+        now = time.monotonic()
+
+        with self._progress_status_lock:
+            if (
+                self._last_progress_status_at > 0
+                and now - self._last_progress_status_at
+                < self.PROGRESS_STATUS_INTERVAL_SECONDS
+            ):
+                return
+            self._last_progress_status_at = now
+
+        self.on_status(
+            self.state.get_full_status(),
+            self.state.line_progress(),
+        )
 
     def _callbacks(self) -> EngineCallbacks:
         return EngineCallbacks(
@@ -66,7 +94,7 @@ class TranslationJob:
                 self.state.get_full_status(msg),
                 None,
             ),
-            on_progress=self.state.increment_translated,
+            on_progress=self._on_progress,
         )
 
     def run_analysis(self, options: TranslationOptions) -> None:
@@ -204,6 +232,7 @@ class TranslationJob:
             snbt_proc = SnbtProcessor(service, self.state, callbacks)
             bq_proc = BQProcessor(service, self.state, callbacks)
 
+            self._reset_progress_status_throttle()
             self.state.begin_progress()
             self.on_log(f"🚀 ЗАПУСК ПЕРЕВОДА ({lang['name']})...\n", "yellow")
 
@@ -303,7 +332,6 @@ class TranslationJob:
                         f"{traceback.format_exc()}",
                         "red",
                     )
-            # AI-сервер (KoboldCPP) остаётся запущенным для последующих задач.
 
         if failed:
             self.on_status("Ошибка перевода", 1.0)
@@ -321,7 +349,6 @@ class TranslationJob:
             if options.output_mode == "resourcepack":
                 self.on_log("💡 Включите ресурспак и датапак в игре.", "yellow")
             self.on_status("Все задачи выполнены!", 1.0)
-
 
     def stop(self) -> None:
         self.state.stop()

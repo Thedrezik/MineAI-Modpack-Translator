@@ -218,7 +218,6 @@ class JarProcessor:
         translated = self.service.translate_dict(pending, target_lang, self.callbacks, context=mod_name)
         for key, value in translated.items():
             merged[key] = value
-        self.state.increment_translated(len(translated))
         return self._write_lang_output(merged, tr_path, output_mode, pack_writer, zout, written_inplace, item, en_data)
 
     def _write_lang_output(self, data, tr_path, output_mode, pack_writer, zout, written_inplace, item, en_data) -> bool:
@@ -295,7 +294,6 @@ class JarProcessor:
             self.callbacks.on_log(f"⚡ Перевод {mod_name} [Книга JSON] — {len(pending)} строк", "magenta")
             translated = self.service.translate_dict(pending, target_lang, self.callbacks, context=mod_name)
             apply_translations_by_path(en_data, translated)
-            self.state.increment_translated(len(translated))
 
         payload = json.dumps(en_data, ensure_ascii=False, indent=2).encode("utf-8")
         if output_mode == "resourcepack" and pack_writer:
@@ -424,7 +422,6 @@ class JarProcessor:
                 lines_out[idx] = prefix + value + suffix
             else:
                 lines_out[idx] = value
-        self.state.increment_translated(len(translated))
 
         payload = "\n".join(lines_out).encode("utf-8")
         if output_mode == "resourcepack" and pack_writer:

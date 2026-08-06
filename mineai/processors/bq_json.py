@@ -61,8 +61,6 @@ class BQProcessor:
         for key, value in translated.items():
              bq_data[key] = value
              
-        self.state.increment_translated(len(translated))
-
         # Сохраняем файл обратно
         payload = json.dumps(data, indent=2, ensure_ascii=False)
         atomic_write_text(file_path, payload)

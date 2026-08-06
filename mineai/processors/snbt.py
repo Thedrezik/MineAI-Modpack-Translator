@@ -93,7 +93,6 @@ class SnbtProcessor:
         
         mapping = {strings[i]: translated.get(str(i), strings[i]) for i in range(len(strings))}
         
-        self.state.increment_translated(len(mapping))
         new_content = apply_snbt_translations(content, mapping)
         
         # Шаг 3. Сохраняем в целевой файл (заменяя авторский ru_ru.snbt)

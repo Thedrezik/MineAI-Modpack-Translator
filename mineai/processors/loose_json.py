@@ -70,7 +70,6 @@ class LooseJsonProcessor:
             # -----------------------------
             
             merged.update(translated)
-            self.state.increment_translated(len(translated))
 
         payload = json.dumps(merged, ensure_ascii=False, indent=2).encode("utf-8")
         if output_mode == "resourcepack" and pack_writer:

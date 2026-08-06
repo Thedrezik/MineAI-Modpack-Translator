@@ -34,8 +34,21 @@ class JobState:
     def __post_init__(self) -> None:
         self._condition = threading.Condition(self._lock)
 
+    def _reset_progress_unlocked(self) -> None:
+        self.total_strings = 0
+        self.translated_strings = 0
+        self.current_file_type = ""
+        self.current_file_done = 0
+        self.total_files = 0
+        self.start_time = None
+
+    def reset_progress(self) -> None:
+        with self._lock:
+            self._reset_progress_unlocked()
+
     def start(self) -> None:
         with self._condition:
+            self._reset_progress_unlocked()
             self.is_running = True
             self.is_paused = False
             self._condition.notify_all()
@@ -105,11 +118,10 @@ class JobState:
             self.total_files = total
 
     def line_progress(self) -> float:
-        """Прогресс 0..1 по строкам — для шкалы."""
         snapshot = self.snapshot()
         if snapshot.total_strings <= 0:
             return 0.0
-        return min(snapshot.translated_strings / snapshot.total_strings, 1.0) 
+        return min(snapshot.translated_strings / snapshot.total_strings, 1.0)
 
     def snapshot(self) -> JobSnapshot:
         with self._lock:
@@ -126,17 +138,21 @@ class JobState:
 
     @staticmethod
     def _eta_text(snapshot: JobSnapshot, now: float | None = None) -> str:
-        if not snapshot.start_time or snapshot.translated_strings == 0:
+        if snapshot.translated_strings <= 0 or not snapshot.start_time:
             return "расчёт..."
+
         elapsed = (time.time() if now is None else now) - snapshot.start_time
         if elapsed < 5:
             return "расчёт..."
+
         remaining = snapshot.total_strings - snapshot.translated_strings
         if remaining <= 0:
-            return "готово"
+            return "завершается..." if snapshot.is_running else "готово"
+
         rate = snapshot.translated_strings / elapsed
         if rate <= 0:
             return "расчёт..."
+
         seconds = remaining / rate
         if seconds < 60:
             return f"{int(seconds)} сек"
@@ -159,8 +175,12 @@ class JobState:
 
         string_info = ""
         if snapshot.total_strings > 0:
+            display_translated = min(
+                snapshot.translated_strings,
+                snapshot.total_strings,
+            )
             string_info = (
-                f"Строки: {snapshot.translated_strings}/"
+                f"Строки: {display_translated}/"
                 f"{snapshot.total_strings} | "
             )
 
