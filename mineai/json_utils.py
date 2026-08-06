@@ -30,12 +30,6 @@ def key_to_path(key: str) -> tuple:
     return tuple(parts)
 
 
-def get_at_path(data: Any, path: tuple) -> Any:
-    cur = data
-    for part in path:
-        cur = cur[part]
-    return cur
-
 
 def set_at_path(data: Any, path: tuple, value: Any) -> None:
     cur = data

@@ -10,7 +10,6 @@ from mineai.processors.snbt_extract import extract_snbt_strings
 from mineai.runtime.state import JobState
 from mineai.text_processing import (
     already_translated,
-    apply_smart_glue,
     is_technical_term,
     is_translation_key,
     looks_like_source_language,
@@ -157,11 +156,19 @@ class ModpackAnalyzer:
         b_en = b_tr = m_en = m_tr = 0
         for item in zin.infolist():
             fl = item.filename.lower()
-            is_jb = fl.endswith(".json") and (
-                ("/en_us/" in fl and any(x in fl for x in BOOK_PATH_MARKERS))
-                or any(x in fl for x in RESEARCH_PATH_MARKERS)
+            is_jb = (
+                fl.endswith(".json")
+                and "/en_us/" in fl
+                and (
+                    any(x in fl for x in BOOK_PATH_MARKERS)
+                    or any(x in fl for x in RESEARCH_PATH_MARKERS)
+                )
             )
-            is_mb = (fl.endswith(".md") or fl.endswith(".txt")) and any(x in fl for x in MD_PATH_MARKERS)
+            is_mb = (
+                (fl.endswith(".md") or fl.endswith(".txt"))
+                and "/en_us/" in fl
+                and any(x in fl for x in MD_PATH_MARKERS)
+            )
             if is_jb:
                 try:
                     en = load_lenient_json(zin.read(item))
@@ -180,6 +187,7 @@ class ModpackAnalyzer:
                     en_t = zin.read(item).decode("utf-8-sig", errors="ignore")
                     tr_path = fl.replace("/en_us/", f"/{target_file.replace('.json','')}/") if "/en_us/" in fl else fl
                     tr_t = zin.read(locale[tr_path]).decode("utf-8-sig", errors="ignore") if tr_path in locale else ""
+                    tr_lines = tr_t.split("\n")
                     in_yaml = False
                     for idx, line in enumerate(en_t.split("\n")):
                         if line.strip() == "---":
@@ -189,14 +197,14 @@ class ModpackAnalyzer:
                             m = re.match(r'^(\s*title\s*:\s*[\'"]?)(.*?)([\'"]?)$', line, re.IGNORECASE)
                             if m and looks_like_source_language(m.group(2)):
                                 m_en += 1
-                                if idx < len(tr_t.split("\n")) and already_translated(tr_t.split("\n")[idx], target_regex):
+                                if idx < len(tr_lines) and already_translated(tr_lines[idx], target_regex):
                                     m_tr += 1
                             continue
                         if line.strip().startswith("<") or line.strip().startswith("!["):
                             continue
                         if line.strip() and looks_like_source_language(line) and not is_technical_term(line):
                             m_en += 1
-                            if idx < len(tr_t.split("\n")) and already_translated(tr_t.split("\n")[idx], target_regex):
+                            if idx < len(tr_lines) and already_translated(tr_lines[idx], target_regex):
                                 m_tr += 1
                 except OSError:
                     pass

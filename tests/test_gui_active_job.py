@@ -2,6 +2,7 @@ import os
 import queue
 import sys
 import tempfile
+import threading
 import types
 import unittest
 from types import SimpleNamespace
@@ -76,11 +77,17 @@ class TranslatorAppJobLifecycleTests(unittest.TestCase):
         state.stop = mock.Mock(side_effect=finish)
         state.toggle_pause = mock.Mock(side_effect=toggle_pause)
         app.job_state = state
+        app._ui_thread_id = threading.get_ident()
+        app._ui_queue = queue.Queue()
         app._lock_ui = mock.Mock()
         app._clear_log = mock.Mock()
         app._translation_options = mock.Mock(return_value=object())
+        app.btn_settings = mock.Mock()
+        app.btn_analyze = mock.Mock()
+        app.btn_start = mock.Mock()
         app.btn_pause = mock.Mock()
         app.btn_stop = mock.Mock()
+        app.log = mock.Mock()
         app.set_status = mock.Mock()
         return app
 
@@ -107,10 +114,8 @@ class TranslatorAppJobLifecycleTests(unittest.TestCase):
             app._stop()
 
         self.assertIs(app._job, active_job)
-        app._job_instance.assert_called_once_with()
         active_job.stop.assert_called_once_with()
         app.job_state.stop.assert_not_called()
-        self.assertEqual(len(created_threads), 1)
         self.assertTrue(created_threads[0].started)
 
         created_threads[0].target()
@@ -119,10 +124,10 @@ class TranslatorAppJobLifecycleTests(unittest.TestCase):
             app._translation_options.return_value
         )
         self.assertIsNone(app._job)
-        self.assertFalse(app.job_state.is_running)
+        app.job_state.finish.assert_called_once_with()
         app._lock_ui.assert_called_with(False)
 
-    def test_analysis_retains_job_and_clears_it_after_failure(self) -> None:
+    def test_analysis_exception_is_logged_and_worker_is_cleaned_up(self) -> None:
         app = self._bare_app()
         active_job = mock.Mock()
         active_job.run_analysis.side_effect = RuntimeError("analysis failed")
@@ -141,17 +146,32 @@ class TranslatorAppJobLifecycleTests(unittest.TestCase):
         ):
             app._start_analysis()
 
-        self.assertIs(app._job, active_job)
-        app._job_instance.assert_called_once_with()
-        self.assertEqual(len(created_threads), 1)
-        self.assertTrue(created_threads[0].started)
-
-        with self.assertRaisesRegex(RuntimeError, "analysis failed"):
-            created_threads[0].target()
+        created_threads[0].target()
 
         self.assertIsNone(app._job)
-        self.assertFalse(app.job_state.is_running)
+        app.job_state.finish.assert_called_once_with()
         app._lock_ui.assert_called_with(False)
+        app.set_status.assert_called_with("❌ Ошибка анализа", None)
+        self.assertTrue(
+            any("analysis failed" in call.args[0] for call in app.log.call_args_list)
+        )
+
+    def test_translation_exception_is_logged_and_worker_is_cleaned_up(self) -> None:
+        app = self._bare_app()
+        active_job = mock.Mock()
+        active_job.run_translation.side_effect = RuntimeError("translation failed")
+        app._job = active_job
+        options = object()
+
+        app._run_translation_thread(options)
+
+        self.assertIsNone(app._job)
+        app.job_state.finish.assert_called_once_with()
+        app._lock_ui.assert_called_with(False)
+        app.set_status.assert_called_with("❌ Ошибка перевода", None)
+        self.assertTrue(
+            any("translation failed" in call.args[0] for call in app.log.call_args_list)
+        )
 
     def test_stop_falls_back_to_shared_state_without_active_job(self) -> None:
         app = self._bare_app()
@@ -174,6 +194,92 @@ class TranslatorAppJobLifecycleTests(unittest.TestCase):
         self.assertEqual(callback, app.set_status)
         self.assertEqual(args, ("Working", 0.5))
         app.after.assert_not_called()
+
+    def test_callback_failure_does_not_stop_queue_draining(self) -> None:
+        app = object.__new__(gui_app.TranslatorApp)
+        app._ui_queue = queue.Queue()
+        app.after = mock.Mock()
+        app.log = mock.Mock()
+        completed = mock.Mock()
+        app._ui_queue.put((mock.Mock(side_effect=RuntimeError("callback failed")), ()))
+        app._ui_queue.put((completed, ("done",)))
+
+        gui_app.TranslatorApp._drain_ui_queue(app)
+
+        completed.assert_called_once_with("done")
+        app.after.assert_called_once_with(50, app._drain_ui_queue)
+        self.assertTrue(
+            any("callback failed" in call.args[0] for call in app.log.call_args_list)
+        )
+
+    def test_lock_ui_also_locks_settings_button(self) -> None:
+        app = self._bare_app()
+        app._lock_ui = gui_app.TranslatorApp._lock_ui.__get__(
+            app,
+            gui_app.TranslatorApp,
+        )
+
+        app._lock_ui(True)
+        app._lock_ui(False)
+
+        self.assertEqual(
+            app.btn_settings.configure.call_args_list,
+            [mock.call(state="disabled"), mock.call(state="normal")],
+        )
+
+
+    def test_open_log_file_uses_cross_platform_opener(self) -> None:
+        app = self._bare_app()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            previous_cwd = os.getcwd()
+            os.chdir(temp_dir)
+            try:
+                with open("mineai_log.txt", "w", encoding="utf-8") as log_file:
+                    log_file.write("test")
+                with (
+                    mock.patch.object(gui_app.sys, "platform", "linux"),
+                    mock.patch.object(gui_app.subprocess, "Popen") as popen,
+                ):
+                    app._open_log_file()
+            finally:
+                os.chdir(previous_cwd)
+
+        popen.assert_called_once()
+        self.assertEqual(popen.call_args.args[0][0], "xdg-open")
+        app.log.assert_not_called()
+
+    def test_migration_window_schedules_destroy_on_ui_thread(self) -> None:
+        migration_module = sys.modules[gui_app.MigrationWindow.__module__]
+        window = object.__new__(gui_app.MigrationWindow)
+        window.ent_zip = SimpleNamespace(get=lambda: "/tmp/translations.zip")
+        window.btn_run = mock.Mock()
+        window.var_cache = SimpleNamespace(get=lambda: "ai")
+        window.mc_dir = "/tmp/modpack"
+        window.lang_api_code = "ru"
+        window.log_callback = mock.Mock()
+        window.cache_ai = mock.Mock()
+        window.cache_std = mock.Mock()
+        window.after = mock.Mock()
+        window.destroy = mock.Mock()
+        created_threads = []
+
+        def make_thread(*, target, daemon):
+            thread = _DeferredThread(target=target, daemon=daemon)
+            created_threads.append(thread)
+            return thread
+
+        with (
+            mock.patch.object(migration_module.os.path, "exists", return_value=True),
+            mock.patch.object(migration_module, "run_migration", return_value=0),
+            mock.patch.object(migration_module.threading, "Thread", side_effect=make_thread),
+        ):
+            window._run()
+
+        self.assertTrue(created_threads[0].started)
+        window.destroy.assert_not_called()
+        created_threads[0].target()
+        window.destroy.assert_not_called()
+        window.after.assert_called_once_with(0, window.destroy)
 
 
 if __name__ == "__main__":

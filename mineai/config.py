@@ -22,6 +22,8 @@ class ConfigManager:
             "model_path": "",
             "gpu_layers": "99",
             "ai_provider": "local",
+            "ai_retries": "3",
+            "fallback_google": "False",
         },
         "API": {
             "deepl_key": "",

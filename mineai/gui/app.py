@@ -1,9 +1,13 @@
+import ctypes
 import os
+from pathlib import Path
 import queue
+import subprocess
+import sys
 import threading
 import tkinter as tk
-import sys
-import ctypes
+import traceback
+import webbrowser
 from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
@@ -12,24 +16,23 @@ from mineai import __version__
 from mineai.cache import load_both_caches
 from mineai.config import settings
 from mineai.constants import LANGUAGES, MC_VERSIONS
+from mineai.gui.migration import MigrationWindow
 from mineai.gui.settings import SettingsWindow
 from mineai.runtime.job import TranslationJob, TranslationOptions
 from mineai.runtime.state import JobState
-from mineai.gui.migration import MigrationWindow
+
 
 def _resolve_icon_path() -> str | None:
-    """Ищет icon.ico: в ресурсах PyInstaller, рядом с EXE и в cwd."""
-    candidates = []
+    """Find icon.ico in PyInstaller resources, next to the EXE, or in cwd."""
+    candidates: list[str] = []
     if getattr(sys, "frozen", False):
         base = getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
         candidates.append(os.path.join(base, "icon.ico"))
         candidates.append(os.path.join(os.path.dirname(sys.executable), "icon.ico"))
     candidates.append(os.path.join(os.getcwd(), "icon.ico"))
-    for path in candidates:
-        if os.path.exists(path):
-            return path
-    return None
-    
+    return next((path for path in candidates if os.path.exists(path)), None)
+
+
 class TranslatorApp(ctk.CTk):
     def __init__(self) -> None:
         super().__init__()
@@ -40,8 +43,6 @@ class TranslatorApp(ctk.CTk):
         if icon_path:
             try:
                 self.iconbitmap(icon_path)
-                # default= — чтобы дочерние окна (настройки, редактор промптов)
-                # тоже получали нашу иконку, а не перо Tk
                 self.iconbitmap(default=icon_path)
             except tk.TclError:
                 pass
@@ -61,15 +62,22 @@ class TranslatorApp(ctk.CTk):
         self.after(50, self._drain_ui_queue)
 
         if polish_total:
-            self.log(f"✨ Кэш проверен: исправлено/удалено ошибок: {polish_total}.", "magenta")
+            self.log(
+                f"✨ Кэш проверен: исправлено/удалено ошибок: {polish_total}.",
+                "magenta",
+            )
 
     def _build_ui(self) -> None:
         left = ctk.CTkScrollableFrame(self, width=370)
         left.pack(side="left", fill="y", padx=10, pady=10)
 
-        ctk.CTkButton(left, text="⚙ НАСТРОЙКИ", fg_color="#555", command=self._open_settings).pack(
-            fill="x", padx=10, pady=(0, 15)
+        self.btn_settings = ctk.CTkButton(
+            left,
+            text="⚙ НАСТРОЙКИ",
+            fg_color="#555",
+            command=self._open_settings,
         )
+        self.btn_settings.pack(fill="x", padx=10, pady=(0, 15))
 
         ctk.CTkLabel(left, text="ПАПКА MINECRAFT", font=("", 14, "bold")).pack(pady=(5, 5))
         self.lbl_folder = ctk.CTkLabel(left, text="Не выбрана", text_color="gray")
@@ -177,12 +185,20 @@ class TranslatorApp(ctk.CTk):
         ctk.CTkRadioButton(left, text="С нуля (перезапись)", variable=self.var_mode, value="force").pack(anchor="w", padx=20, pady=2)
 
         self.btn_migrate = ctk.CTkButton(
-            left, text="📦 Миграция ресурс-пака", fg_color="#17a2b8", hover_color="#138496", command=self._open_migration
+            left,
+            text="📦 Миграция ресурс-пака",
+            fg_color="#17a2b8",
+            hover_color="#138496",
+            command=self._open_migration,
         )
         self.btn_migrate.pack(pady=(20, 0), fill="x", padx=20)
 
         self.btn_analyze = ctk.CTkButton(
-            left, text="Анализ сборки", fg_color="#0066cc", hover_color="#004c99", command=self._start_analysis
+            left,
+            text="Анализ сборки",
+            fg_color="#0066cc",
+            hover_color="#004c99",
+            command=self._start_analysis,
         )
         self.btn_analyze.pack(pady=(10, 10), fill="x", padx=20)
         self.btn_start = ctk.CTkButton(
@@ -230,7 +246,7 @@ class TranslatorApp(ctk.CTk):
         
         right = ctk.CTkFrame(self)
         right.pack(side="right", fill="both", expand=True, padx=(0, 10), pady=10)
-        self.textbox = ctk.CTkTextbox(right, font=("Consolas", 13))
+        self.textbox = ctk.CTkTextbox(right, font=("Consolas", 13)) # Убрали state="disabled"
         self.textbox.pack(fill="both", expand=True, padx=10, pady=10)
 
         # Функция для защиты от печати, но с разрешением на копирование
@@ -366,7 +382,14 @@ class TranslatorApp(ctk.CTk):
                 callback, args = self._ui_queue.get_nowait()
             except queue.Empty:
                 break
-            callback(*args)
+            try:
+                callback(*args)
+            except Exception:
+                error = traceback.format_exc()
+                try:
+                    self.log(f"❌ Ошибка UI callback:\n{error}", "red")
+                except Exception:
+                    pass
         self.after(50, self._drain_ui_queue)
 
     def log(self, message: str, tag: str = "white") -> None:
@@ -377,6 +400,7 @@ class TranslatorApp(ctk.CTk):
         self.textbox.insert("end", message + "\n", tag)
         if self.auto_scroll or at_bottom:
             self.textbox.see("end")
+        
         
         # Запись в общий текстовый лог
         try:
@@ -419,6 +443,7 @@ class TranslatorApp(ctk.CTk):
             return
         state = "disabled" if locked else "normal"
         rev = "normal" if locked else "disabled"
+        self.btn_settings.configure(state=state)
         self.btn_analyze.configure(state=state)
         self.btn_start.configure(state=state)
         self.btn_stop.configure(state=rev)
@@ -444,8 +469,10 @@ class TranslatorApp(ctk.CTk):
         self.set_status("🛑 Остановка...", 1.0)
 
     def _clear_log(self) -> None:
+        
         self.textbox.delete("1.0", "end")
         
+
     def _start_analysis(self) -> None:
         self._lock_ui(True)
         self.job_state.start()
@@ -461,6 +488,10 @@ class TranslatorApp(ctk.CTk):
         try:
             if self._job is not None:
                 self._job.run_analysis(options)
+        except Exception:
+            error = traceback.format_exc()
+            self.log(f"❌ Ошибка анализа:\n{error}", "red")
+            self.set_status("❌ Ошибка анализа", None)
         finally:
             self.job_state.finish()
             self._job = None
@@ -472,7 +503,7 @@ class TranslatorApp(ctk.CTk):
             return
         if self.var_engine.get() == "ai":
             settings.set("AI", "ai_provider", self.var_ai_provider.get())
-            settings.set("AI", "fallback_google", self.var_ai_fallback.get())
+            settings.set("AI", "fallback_google", self.var_ai_fallback.get()) # <-- СОХРАНЯЕМ ВЫБОР
         self._lock_ui(True)
         self.job_state.start()
         self.btn_pause.configure(text="⏸ ПАУЗА", fg_color="#ffc107", text_color="black")
@@ -484,39 +515,61 @@ class TranslatorApp(ctk.CTk):
             daemon=True,
         ).start()
     
+    
     def _open_log_file(self) -> None:
-        log_path = "mineai_log.txt"
-        if os.path.exists(log_path):
-            try:
-                # Так как ты работаешь на Windows, используем os.startfile
-                os.startfile(log_path)
-            except Exception as e:
-                self.log(f"❌ Не удалось открыть лог: {e}", "red")
-        else:
+        log_path = Path("mineai_log.txt").resolve()
+        if not log_path.exists():
             self.log("❌ Лог-файл еще не создан.", "yellow")
-            
+            return
+
+        try:
+            if sys.platform == "win32":
+                os.startfile(str(log_path))
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", str(log_path)])
+            else:
+                try:
+                    subprocess.Popen(["xdg-open", str(log_path)])
+                except OSError:
+                    if not webbrowser.open(log_path.as_uri()):
+                        raise RuntimeError("не найдено приложение для открытия файла")
+        except Exception as exc:
+            self.log(f"❌ Не удалось открыть лог: {exc}", "red")
+
     def _run_translation_thread(self, options: TranslationOptions) -> None:
         try:
             if self._job is not None:
                 self._job.run_translation(options)
+        except Exception:
+            error = traceback.format_exc()
+            self.log(f"❌ Ошибка перевода:\n{error}", "red")
+            self.set_status("❌ Ошибка перевода", None)
         finally:
             self.job_state.finish()
             self._job = None
             self._lock_ui(False)
 
     def _open_migration(self) -> None:
-        if not settings.get("GENERAL", "mc_dir"):
+        mc_dir = settings.get("GENERAL", "mc_dir")
+        if not mc_dir:
             messagebox.showerror("Ошибка", "Сначала выберите папку Minecraft!")
             return
-        MigrationWindow(self, settings.get("GENERAL", "mc_dir"), self.var_lang.get(), self.cache_std, self.cache_ai, self.log)
+        MigrationWindow(
+            self,
+            mc_dir,
+            self.var_lang.get(),
+            self.cache_std,
+            self.cache_ai,
+            self.log,
+        )
 
 
 def run() -> None:
     if sys.platform == "win32":
         try:
-            # Говорим Windows считать нас отдельным приложением —
-            # тогда в панели задач будет наша иконка, а не дефолтная
-            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("MineAI.Translator")
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+                "MineAI.Translator"
+            )
         except Exception:
             pass
     app = TranslatorApp()
