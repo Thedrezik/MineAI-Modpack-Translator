@@ -20,7 +20,7 @@ with tempfile.TemporaryDirectory() as _import_cwd:
         os.chdir(_original_cwd)
 
 
-TARGET_LANG = {"api": "ru", "name": "Russian"}
+TARGET_LANG = {"api": "ru", "name": "Russian", "regex": r"[А-Яа-яЁё]"}
 
 
 def callbacks(
@@ -47,8 +47,8 @@ class MemoryCache:
     def __init__(self) -> None:
         self.values: dict[tuple[str, str], str] = {}
 
-    def get(self, api_code: str, source: str) -> str | None:
-        return self.values.get((api_code, source))
+    def get(self, api_code: str, source: str) -> tuple[str | None, bool]:
+        return self.values.get((api_code, source)), False
 
     def set(self, api_code: str, source: str, translated: str) -> None:
         self.values[(api_code, source)] = translated
