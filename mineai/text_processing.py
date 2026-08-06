@@ -6,6 +6,11 @@ from mineai.constants import DICT_FILE, IGNORE_TERMS
 from mineai.io_utils import atomic_write_text
 
 
+_IGNORE_TERMS_CASEFOLD = frozenset(
+    term.casefold() for term in IGNORE_TERMS
+)
+
+
 PLACEHOLDER_PATTERN = re.compile(r"\[\s*#\s*(\d+)\s*#\s*\]")
 
 FORMAT_PATTERN = re.compile(
@@ -129,16 +134,40 @@ def unmask_translation(text: str, mapping: dict[str, str]) -> str:
 def is_technical_term(text: str) -> bool:
     if not text:
         return True
-    lower = text.lower()
+
+    stripped = text.strip()
+    if not stripped:
+        return True
+
+    if stripped.casefold() in _IGNORE_TERMS_CASEFOLD:
+        return True
+
+    lower = stripped.lower()
+
     if not re.search(r"[a-z]", lower):
         return True
-    if re.match(r"^[a-z0-9_.-]+$", lower) and any(c in lower for c in "._"):
+
+    if (
+        re.fullmatch(r"[a-z0-9_.-]+", lower)
+        and any(char in lower for char in "._")
+    ):
         return True
+
     prefixes = (
-        "glyph_", "ritual_", "familiar_", "source_", "mana_", "spell_",
-        "effect_", "rune_", "altar_", "botania_", "create_", "kubejs_",
+        "glyph_",
+        "ritual_",
+        "familiar_",
+        "source_",
+        "mana_",
+        "spell_",
+        "effect_",
+        "rune_",
+        "altar_",
+        "botania_",
+        "create_",
+        "kubejs_",
     )
-    return any(lower.startswith(p) for p in prefixes)
+    return any(lower.startswith(prefix) for prefix in prefixes)
 
 
 def is_translation_key(text: str) -> bool:

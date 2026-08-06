@@ -2,11 +2,21 @@ import json
 import os
 import shutil
 import threading
+import unicodedata
 from typing import Callable
 
 from mineai.constants import CACHE_FILE_AI, CACHE_FILE_STD
 from mineai.io_utils import atomic_write_text
 from mineai.text_processing import polish_translation
+
+
+_IDENTITY_PREFIX = "__mineai_identity__:"
+
+
+def _normalize_cache_source(text: str) -> str:
+    """Normalize representation without changing case or inner whitespace."""
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    return unicodedata.normalize("NFC", text)
 
 
 class TranslationCache:
@@ -15,11 +25,11 @@ class TranslationCache:
     def __init__(self, filepath: str) -> None:
         self.filepath = filepath
         self._data: dict[str, str] = {}
-        self._imported_data: dict[str, str] = {}  # Изолированный кэш для импорта
+        self._imported_data: dict[str, str] = {}
         self._lock = threading.RLock()
         self._dirty = False
         self._last_saved_count = 0
-        
+
         self.load_imported_caches()
         self.polish_changes = self.load_and_polish()
 
@@ -29,10 +39,10 @@ class TranslationCache:
             cache_name = os.path.basename(self.filepath)
             subfolder = "ai" if "ai" in cache_name else "std"
             import_dir = os.path.join(os.getcwd(), "imported_caches", subfolder)
-            
+
             if not os.path.exists(import_dir):
                 return
-                
+
             for filename in os.listdir(import_dir):
                 if filename.endswith(".json"):
                     path = os.path.join(import_dir, filename)
@@ -68,7 +78,15 @@ class TranslationCache:
                 return 0
 
             for key, value in list(self._data.items()):
-                api_code, _, source = key.partition("_")
+                if key.startswith(_IDENTITY_PREFIX):
+                    continue
+
+                api_code, separator, source = key.partition("_")
+                if not separator:
+                    del self._data[key]
+                    changes += 1
+                    continue
+
                 if api_code != "en" and value == source:
                     del self._data[key]
                     changes += 1
@@ -84,22 +102,84 @@ class TranslationCache:
         return changes
 
     def make_key(self, api_code: str, source_text: str) -> str:
-        return f"{api_code}_{source_text}"
+        normalized = _normalize_cache_source(source_text)
+        return f"{api_code}_{normalized}"
 
-    def get(self, api_code: str, source_text: str) -> tuple[str | None, bool]:
-        key = self.make_key(api_code, source_text)
+    def make_identity_key(self, api_code: str, source_text: str) -> str:
+        return _IDENTITY_PREFIX + self.make_key(api_code, source_text)
+
+    def get(
+        self,
+        api_code: str,
+        source_text: str,
+    ) -> tuple[str | None, bool]:
+        canonical_key = self.make_key(api_code, source_text)
+        legacy_key = f"{api_code}_{source_text}"
+        keys = tuple(dict.fromkeys((canonical_key, legacy_key)))
+        identity_key = self.make_identity_key(api_code, source_text)
+
         with self._lock:
-            if key in self._data:
-                return self._data[key], False  # False = из обычного кэша
-            if key in self._imported_data:
-                return self._imported_data[key], True  # True = из импортированного архива
+            for key in keys:
+                if key in self._data:
+                    return self._data[key], False
+
+            for key in keys:
+                if key in self._imported_data:
+                    return self._imported_data[key], True
+
+            if identity_key in self._data:
+                return source_text, False
+
             return None, False
 
     def set(self, api_code: str, source_text: str, translated: str) -> None:
-        key = self.make_key(api_code, source_text)
+        canonical_key = self.make_key(api_code, source_text)
+        legacy_key = f"{api_code}_{source_text}"
+        identity_key = self.make_identity_key(api_code, source_text)
+
         with self._lock:
-            self._data[key] = translated
+            self._data.pop(identity_key, None)
+            if legacy_key != canonical_key:
+                self._data.pop(legacy_key, None)
+            self._data[canonical_key] = translated
             self._dirty = True
+
+    def set_identity(self, api_code: str, source_text: str) -> None:
+        """Remember an intentionally unchanged technical token."""
+        canonical_key = self.make_key(api_code, source_text)
+        legacy_key = f"{api_code}_{source_text}"
+        identity_key = self.make_identity_key(api_code, source_text)
+
+        with self._lock:
+            self._data.pop(canonical_key, None)
+            self._data.pop(legacy_key, None)
+            self._data[identity_key] = "1"
+            self._dirty = True
+
+    def discard(
+        self,
+        api_code: str,
+        source_text: str,
+        *,
+        include_imported: bool = False,
+    ) -> None:
+        canonical_key = self.make_key(api_code, source_text)
+        legacy_key = f"{api_code}_{source_text}"
+        identity_key = self.make_identity_key(api_code, source_text)
+
+        with self._lock:
+            local_removed = False
+            for key in dict.fromkeys((canonical_key, legacy_key, identity_key)):
+                if key in self._data:
+                    del self._data[key]
+                    local_removed = True
+
+            if include_imported:
+                self._imported_data.pop(canonical_key, None)
+                self._imported_data.pop(legacy_key, None)
+
+            if local_removed:
+                self._dirty = True
 
     def __len__(self) -> int:
         with self._lock:
