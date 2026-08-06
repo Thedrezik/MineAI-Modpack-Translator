@@ -3,11 +3,28 @@ import os
 import re
 import zipfile
 
-from mineai.constants import BOOK_PATH_MARKERS, MD_PATH_MARKERS, RESEARCH_PATH_MARKERS
-from mineai.json_utils import iter_translatable_strings, load_lenient_json
-from mineai.processors.snbt_extract import extract_snbt_strings
+from mineai.constants import (
+    BOOK_PATH_MARKERS,
+    MD_PATH_MARKERS,
+    RESEARCH_PATH_MARKERS,
+)
+from mineai.json_utils import load_lenient_json
+from mineai.processors.locale_keys import (
+    collect_lang_keys_to_translate,
+    count_translatable_lang_entries,
+)
+from mineai.processors.selection import (
+    collect_book_json_selection,
+    collect_book_markdown_selection,
+    collect_bq_selection,
+    collect_snbt_selection,
+    skip_threshold_reached,
+)
+from mineai.processors.snbt import (
+    get_snbt_target_path,
+    should_ignore_snbt_source,
+)
 from mineai.runtime.state import JobState
-from mineai.text_processing import already_translated, apply_smart_glue, is_technical_term, looks_like_source_language
 
 
 class StringEstimator:
@@ -19,7 +36,7 @@ class StringEstimator:
         jar_files: list[str],
         loose_files: list[str],
         snbt_files: list[str],
-        bq_files: list[str], # <-- ДОБАВЛЕНО
+        bq_files: list[str],
         *,
         target_lang: dict,
         mode: str,
@@ -37,167 +54,365 @@ class StringEstimator:
                 return total
             self.state.wait_if_paused()
             total += self._estimate_jar(
-                path, target_file, target_lang, mode, translate_mods, translate_books, smart_glue
+                path,
+                target_file,
+                target_lang,
+                mode,
+                translate_mods,
+                translate_books,
+                smart_glue,
             )
 
         for path in loose_files:
             if not self.state.should_run():
                 return total
-            total += self._estimate_loose(path, target_file, mode)
+            self.state.wait_if_paused()
+            total += self._estimate_loose(
+                path,
+                target_file,
+                mode,
+                target_regex,
+            )
 
         if translate_quests:
             for path in snbt_files:
                 if not self.state.should_run():
                     return total
-                total += self._estimate_snbt(path, mode, target_regex)
-                
-            # <-- ДОБАВЛЕНО
+                self.state.wait_if_paused()
+                total += self._estimate_snbt(
+                    path,
+                    mode,
+                    target_regex,
+                    target_lang["file"],
+                )
+
             for path in bq_files:
                 if not self.state.should_run():
                     return total
+                self.state.wait_if_paused()
                 total += self._estimate_bq(path, mode, target_regex)
 
         return total
 
     def _estimate_jar(
-        self, path, target_file, target_lang, mode, translate_mods, translate_books, smart_glue
+        self,
+        path,
+        target_file,
+        target_lang,
+        mode,
+        translate_mods,
+        translate_books,
+        smart_glue,
     ) -> int:
         count = 0
         try:
-            with zipfile.ZipFile(path, "r") as zin:
+            with zipfile.ZipFile(path, "r") as archive:
                 locale = {
-                    i.filename.lower(): i
-                    for i in zin.infolist()
-                    if target_file in i.filename.lower()
-                    or f"/{target_lang['file']}/" in i.filename.lower()
+                    item.filename.lower(): item
+                    for item in archive.infolist()
+                    if target_file in item.filename.lower()
+                    or f"/{target_lang['file']}/" in item.filename.lower()
                 }
-                for item in zin.infolist():
-                    fl = item.filename.lower()
-                    is_book_json = fl.endswith(".json") and (
-                        ("/en_us/" in fl and any(m in fl for m in BOOK_PATH_MARKERS))
-                        or any(m in fl for m in RESEARCH_PATH_MARKERS)
+                for item in archive.infolist():
+                    file_lower = item.filename.lower()
+                    is_book_json = (
+                        file_lower.endswith(".json")
+                        and "/en_us/" in file_lower
+                        and (
+                            any(
+                                marker in file_lower
+                                for marker in BOOK_PATH_MARKERS
+                            )
+                            or any(
+                                marker in file_lower
+                                for marker in RESEARCH_PATH_MARKERS
+                            )
+                        )
                     )
-                    is_book_md = (fl.endswith(".md") or fl.endswith(".txt")) and any(
-                        m in fl for m in MD_PATH_MARKERS
+                    is_book_md = (
+                        (
+                            file_lower.endswith(".md")
+                            or file_lower.endswith(".txt")
+                        )
+                        and "/en_us/" in file_lower
+                        and any(
+                            marker in file_lower
+                            for marker in MD_PATH_MARKERS
+                        )
                     )
-                    is_lang = fl.endswith("en_us.json") and not is_book_json
+                    is_lang = (
+                        file_lower.endswith("en_us.json")
+                        and not is_book_json
+                    )
 
                     if translate_mods and is_lang:
-                        count += self._count_lang(zin, item, locale, target_file, mode)
+                        count += self._count_lang(
+                            archive,
+                            item,
+                            locale,
+                            target_file,
+                            mode,
+                            target_lang["regex"],
+                        )
                     elif translate_books and is_book_json:
-                        count += self._count_book_json(zin, item)
+                        count += self._count_book_json(
+                            archive,
+                            item,
+                            locale,
+                            target_lang,
+                            mode,
+                        )
                     elif translate_books and is_book_md:
-                        count += self._count_book_md(zin, item, smart_glue)
+                        count += self._count_book_md(
+                            archive,
+                            item,
+                            locale,
+                            target_lang,
+                            mode,
+                            smart_glue,
+                        )
         except (OSError, zipfile.BadZipFile):
-            pass
+            return 0
         return count
 
-    def _count_lang(self, zin, item, locale, target_file, mode) -> int:
+    def _count_lang(
+        self,
+        archive,
+        item,
+        locale,
+        target_file,
+        mode,
+        target_regex,
+    ) -> int:
         try:
-            en = load_lenient_json(zin.read(item))
+            source_data = load_lenient_json(archive.read(item))
         except (json.JSONDecodeError, OSError):
             return 0
-        tr_key = item.filename.lower().replace("en_us.json", target_file)
-        tr = {}
-        if tr_key in locale:
-            try:
-                tr = load_lenient_json(zin.read(locale[tr_key]))
-            except (json.JSONDecodeError, OSError):
-                pass
-        n = 0
-        for key, value in en.items():
-            if not isinstance(value, str) or not looks_like_source_language(value) or is_technical_term(value):
-                continue
-            if mode == "force" or not (key in tr and isinstance(tr[key], str) and tr[key].strip()):
-                n += 1
-        return n
 
-    def _count_book_json(self, zin, item) -> int:
-        try:
-            data = load_lenient_json(zin.read(item))
-        except (json.JSONDecodeError, OSError):
-            return 0
-        return sum(
-            1
-            for _, s in iter_translatable_strings(data)
-            if s.strip() and looks_like_source_language(s) and not is_technical_term(s)
+        target_path = re.sub(
+            r"en_us\.json$",
+            target_file,
+            item.filename,
+            flags=re.IGNORECASE,
         )
+        target_data = {}
+        target_key = target_path.lower()
+        if target_key in locale:
+            try:
+                target_data = load_lenient_json(
+                    archive.read(locale[target_key])
+                )
+            except (json.JSONDecodeError, OSError):
+                target_data = {}
 
-    def _count_book_md(self, zin, item, smart_glue) -> int:
-        try:
-            text = zin.read(item).decode("utf-8-sig", errors="ignore")
-        except OSError:
+        pending = collect_lang_keys_to_translate(
+            source_data,
+            target_data,
+            mode,
+            target_regex,
+        )
+        total_translatable = count_translatable_lang_entries(source_data)
+        if mode == "skip" and skip_threshold_reached(
+            total_translatable,
+            len(pending),
+        ):
             return 0
-        if smart_glue:
-            text = apply_smart_glue(text)
-        n = 0
-        in_yaml = False
-        for line in text.split("\n"):
-            s = line.strip()
-            if s == "---":
-                in_yaml = not in_yaml
-                continue
-            if in_yaml:
-                if s.lower().startswith("title:") and looks_like_source_language(line):
-                    n += 1
-                continue
-            if s.startswith("<") or s.startswith("!["):
-                continue
-            if line.strip() and looks_like_source_language(line) and not is_technical_term(line):
-                n += 1
-        return n
+        return len(pending)
 
-    def _estimate_loose(self, path, target_file, mode) -> int:
+    def _count_book_json(
+        self,
+        archive,
+        item,
+        locale,
+        target_lang,
+        mode,
+    ) -> int:
         try:
-            with open(path, encoding="utf-8") as f:
-                en = load_lenient_json(f.read().encode("utf-8"))
-            tr_path = path.replace("en_us.json", target_file)
-            tr = {}
-            if os.path.exists(tr_path):
-                with open(tr_path, encoding="utf-8") as f:
-                    tr = load_lenient_json(f.read().encode("utf-8"))
+            source_data = load_lenient_json(archive.read(item))
         except (json.JSONDecodeError, OSError):
             return 0
-        n = 0
-        for key, value in en.items():
-            if not isinstance(value, str) or not looks_like_source_language(value) or is_technical_term(value):
-                continue
-            if mode == "force" or not (key in tr and isinstance(tr[key], str) and tr[key].strip()):
-                n += 1
-        return n
 
-    def _estimate_snbt(self, path, mode, target_regex) -> int:
+        target_path = re.sub(
+            r"/en_us/",
+            f"/{target_lang['file']}/",
+            item.filename,
+            flags=re.IGNORECASE,
+        )
+        target_data = {}
+        target_key = target_path.lower()
+        if mode != "force" and target_key in locale:
+            try:
+                target_data = load_lenient_json(
+                    archive.read(locale[target_key])
+                )
+            except (json.JSONDecodeError, OSError):
+                target_data = {}
+
+        source_map, _preserved, pending = collect_book_json_selection(
+            source_data,
+            target_data,
+            mode,
+        )
+        if mode == "skip" and skip_threshold_reached(
+            len(source_map),
+            len(pending),
+        ):
+            return 0
+        return len(pending)
+
+    def _count_book_md(
+        self,
+        archive,
+        item,
+        locale,
+        target_lang,
+        mode,
+        smart_glue,
+    ) -> int:
         try:
-            with open(path, encoding="utf-8") as f:
-                content = f.read()
+            source_text = archive.read(item).decode(
+                "utf-8-sig",
+                errors="ignore",
+            )
         except OSError:
             return 0
-        strings = extract_snbt_strings(content)
-        if mode == "force":
-            return len(strings)
-        return sum(1 for s in strings if not re.search(target_regex, s))
 
+        target_path = re.sub(
+            r"/en_us/",
+            f"/{target_lang['file']}/",
+            item.filename,
+            flags=re.IGNORECASE,
+        )
+        target_text = ""
+        target_key = target_path.lower()
+        if mode != "force" and target_key in locale:
+            try:
+                target_text = archive.read(locale[target_key]).decode(
+                    "utf-8-sig",
+                    errors="ignore",
+                )
+            except OSError:
+                target_text = ""
 
-    def _estimate_bq(self, path: str, mode: str, target_regex: str) -> int:
+        selection = collect_book_markdown_selection(
+            source_text,
+            target_text,
+            mode,
+            smart_glue=smart_glue,
+        )
+        if mode == "skip" and skip_threshold_reached(
+            selection.total_translatable,
+            len(selection.pending),
+        ):
+            return 0
+        return len(selection.pending)
+
+    def _estimate_loose(
+        self,
+        path,
+        target_file,
+        mode,
+        target_regex,
+    ) -> int:
         try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
+            with open(path, encoding="utf-8") as source_file:
+                source_data = load_lenient_json(
+                    source_file.read().encode("utf-8")
+                )
+            target_path = path.replace("en_us.json", target_file)
+            target_data = {}
+            if os.path.exists(target_path):
+                with open(target_path, encoding="utf-8") as target_handle:
+                    target_data = load_lenient_json(
+                        target_handle.read().encode("utf-8")
+                    )
+        except (json.JSONDecodeError, OSError):
+            return 0
+
+        pending = collect_lang_keys_to_translate(
+            source_data,
+            target_data,
+            mode,
+            target_regex,
+        )
+        total_translatable = count_translatable_lang_entries(source_data)
+        if mode == "skip" and skip_threshold_reached(
+            total_translatable,
+            len(pending),
+        ):
+            return 0
+        return len(pending)
+
+    def _estimate_snbt(
+        self,
+        path,
+        mode,
+        target_regex,
+        target_code,
+    ) -> int:
+        if should_ignore_snbt_source(path):
+            return 0
+
+        target_path = get_snbt_target_path(path, target_code)
+        separate_target = target_path != path
+        if (
+            separate_target
+            and mode in ("append", "skip")
+            and os.path.exists(target_path)
+        ):
+            return 0
+
+        if separate_target:
+            original_path = path
+            current_path = path
+        else:
+            backup_path = path + ".bak"
+            original_path = backup_path if os.path.exists(backup_path) else path
+            current_path = original_path if mode == "force" else path
+
+        try:
+            with open(original_path, encoding="utf-8") as original_file:
+                original_content = original_file.read()
+            with open(current_path, encoding="utf-8") as current_file:
+                current_content = current_file.read()
+        except OSError:
+            return 0
+
+        selection = collect_snbt_selection(
+            original_content,
+            current_content,
+            mode,
+            target_regex,
+        )
+        if mode == "skip" and skip_threshold_reached(
+            selection.total_translatable,
+            len(selection.pending),
+        ):
+            return 0
+        return len(selection.pending)
+
+    def _estimate_bq(
+        self,
+        path: str,
+        mode: str,
+        target_regex: str,
+    ) -> int:
+        backup = path + ".bak"
+        source_path = (
+            backup
+            if mode == "force" and os.path.exists(backup)
+            else path
+        )
+        try:
+            with open(source_path, "r", encoding="utf-8") as source_file:
+                data = json.load(source_file)
         except (OSError, json.JSONDecodeError):
             return 0
 
-        n = 0
-        props_key = next((k for k in data if k.startswith("properties")), None)
-        if props_key and isinstance(data[props_key], dict):
-            bq_key = next((k for k in data[props_key] if k.startswith("betterquesting")), None)
-            if bq_key and isinstance(data[props_key][bq_key], dict):
-                bq_data = data[props_key][bq_key]
-                for key_prefix in ["name", "desc"]:
-                    actual_key = next((k for k in bq_data if k.startswith(key_prefix)), None)
-                    if actual_key and isinstance(bq_data[actual_key], str):
-                        text = bq_data[actual_key].strip()
-                        if not text:
-                            continue
-                        # Считаем строку, если режим "С нуля" ИЛИ если в тексте нет русских букв
-                        if mode == "force" or not already_translated(text, target_regex):
-                            n += 1
-        return n
+        selection = collect_bq_selection(data, mode, target_regex)
+        if mode == "skip" and skip_threshold_reached(
+            selection.total_translatable,
+            len(selection.pending),
+        ):
+            return 0
+        return len(selection.pending)

@@ -14,14 +14,18 @@ from mineai.json_utils import (
 )
 from mineai.mod_names import get_mod_name
 from mineai.output.pack_writer import PackWriter
-from mineai.processors.locale_keys import collect_lang_keys_to_translate, count_translatable_lang_entries
-from mineai.runtime.state import JobState
-from mineai.text_processing import (
-    already_translated,
-    apply_smart_glue,
-    is_technical_term,
-    looks_like_source_language,
+from mineai.processors.locale_keys import (
+    collect_lang_keys_to_translate,
+    count_translatable_lang_entries,
 )
+from mineai.processors.selection import (
+    build_book_json_output,
+    collect_book_json_selection,
+    collect_book_markdown_selection,
+    skip_threshold_reached,
+)
+from mineai.runtime.state import JobState
+from mineai.text_processing import is_technical_term, looks_like_source_language
 
 
 class JarProcessor:
@@ -184,7 +188,12 @@ class JarProcessor:
         self, zin, zout, item, locale_files, target_file, target_lang, mode,
         output_mode, pack_writer, mod_name, written_inplace,
     ) -> bool:
-        tr_path = re.sub(r"en_us\.json$", target_file, item.filename, flags=re.IGNORECASE)
+        tr_path = re.sub(
+            r"en_us\.json$",
+            target_file,
+            item.filename,
+            flags=re.IGNORECASE,
+        )
         tr_key = tr_path.lower()
         try:
             en_data = load_lenient_json(zin.read(item))
@@ -198,27 +207,61 @@ class JarProcessor:
             except (json.JSONDecodeError, OSError):
                 tr_data = {}
 
-        pending = collect_lang_keys_to_translate(en_data, tr_data, mode, target_lang["regex"])
-        total = count_translatable_lang_entries(en_data)
-        if total == 0:
+        pending = collect_lang_keys_to_translate(
+            en_data,
+            tr_data,
+            mode,
+            target_lang["regex"],
+        )
+        total_translatable = count_translatable_lang_entries(en_data)
+        if total_translatable == 0:
             return False
 
-        if mode == "skip" and (total - len(pending)) >= total * 0.9:
-            return self._copy_existing(zin, locale_files, tr_key, tr_path, output_mode, pack_writer, en_data, tr_data, mode)
+        if mode == "skip" and skip_threshold_reached(
+            total_translatable,
+            len(pending),
+        ):
+            return self._copy_existing(
+                zin,
+                locale_files,
+                tr_key,
+                tr_path,
+                output_mode,
+                pack_writer,
+                en_data,
+                tr_data,
+                mode,
+            )
 
         merged = en_data.copy()
-        for k, v in tr_data.items():
-            if k in merged and isinstance(merged[k], str) and v:
-                merged[k] = v
+        for key, value in tr_data.items():
+            if key in merged and isinstance(merged[key], str) and value:
+                merged[key] = value
 
-        if not pending:
-            return self._write_lang_output(merged, tr_path, output_mode, pack_writer, zout, written_inplace, item, en_data)
+        if pending:
+            self.callbacks.on_log(
+                f"⚡ Перевод {mod_name} [Интерфейс] — {len(pending)} строк",
+                "cyan",
+            )
+            translated = self.service.translate_dict(
+                pending,
+                target_lang,
+                self.callbacks,
+                context=mod_name,
+            )
+            for key, value in translated.items():
+                merged[key] = value
 
-        self.callbacks.on_log(f"⚡ Перевод {mod_name} [Интерфейс] — {len(pending)} строк", "cyan")
-        translated = self.service.translate_dict(pending, target_lang, self.callbacks, context=mod_name)
-        for key, value in translated.items():
-            merged[key] = value
-        return self._write_lang_output(merged, tr_path, output_mode, pack_writer, zout, written_inplace, item, en_data)
+        return self._write_lang_output(
+            merged,
+            tr_path,
+            output_mode,
+            pack_writer,
+            zout,
+            written_inplace,
+            item,
+            en_data,
+        )
 
     def _write_lang_output(self, data, tr_path, output_mode, pack_writer, zout, written_inplace, item, en_data) -> bool:
         payload = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
@@ -244,58 +287,69 @@ class JarProcessor:
         self, zin, zout, item, locale_files, target_lang, mode,
         output_mode, pack_writer, mod_name, written_inplace,
     ) -> bool:
-        tr_path = re.sub(r"/en_us/", f"/{target_lang['file']}/", item.filename, flags=re.IGNORECASE)
+        tr_path = re.sub(
+            r"/en_us/",
+            f"/{target_lang['file']}/",
+            item.filename,
+            flags=re.IGNORECASE,
+        )
         tr_key = tr_path.lower()
-        # --- ФИКС ДЛЯ КНИГ PATCHOULI (Защита оригинального перевода) ---
-        if mode == "append" and tr_key in locale_files:
-            if output_mode == "resourcepack" and pack_writer:
-                pack_writer.write(tr_path, zin.read(locale_files[tr_key]))
-            elif output_mode == "inplace" and zout:
-                zout.writestr(tr_path, zin.read(locale_files[tr_key]))
-                written_inplace.add(tr_path)
-            return True
-        # ---------------------------------------------------------------
         try:
             en_data = load_lenient_json(zin.read(item))
         except (json.JSONDecodeError, OSError):
             return False
 
         tr_data = {}
-        if tr_key in locale_files:
+        if mode != "force" and tr_key in locale_files:
             try:
                 tr_data = load_lenient_json(zin.read(locale_files[tr_key]))
             except (json.JSONDecodeError, OSError):
-                pass
+                tr_data = {}
 
-        en_map = {path_to_key(p): s for p, s in iter_translatable_strings(en_data) if s.strip()}
-        tr_map = {path_to_key(p): s for p, s in iter_translatable_strings(tr_data)} if tr_data else {}
-
-        pending: dict[str, str] = {}
-        for path_key, source in en_map.items():
-            if is_technical_term(source):
-                continue
-            if not looks_like_source_language(source):
-                continue
-            existing = tr_map.get(path_key, "")
-            if mode == "append" and existing.strip() and existing != source:
-                continue
-            if mode == "append" and existing.strip() == source:
-                pending[path_key] = source
-            else:
-                pending[path_key] = source
-
-        if not en_map:
+        source_map, preserved, pending = collect_book_json_selection(
+            en_data,
+            tr_data,
+            mode,
+        )
+        total_translatable = len(source_map)
+        if total_translatable == 0:
             return False
 
-        if mode == "skip" and len(pending) <= len(en_map) * 0.1:
-            return self._copy_existing(zin, locale_files, tr_key, tr_path, output_mode, pack_writer, en_data, tr_data, mode)
+        if mode == "skip" and skip_threshold_reached(
+            total_translatable,
+            len(pending),
+        ):
+            return self._copy_existing(
+                zin,
+                locale_files,
+                tr_key,
+                tr_path,
+                output_mode,
+                pack_writer,
+                en_data,
+                tr_data,
+                mode,
+            )
 
+        translated: dict[str, str] = {}
         if pending:
-            self.callbacks.on_log(f"⚡ Перевод {mod_name} [Книга JSON] — {len(pending)} строк", "magenta")
-            translated = self.service.translate_dict(pending, target_lang, self.callbacks, context=mod_name)
-            apply_translations_by_path(en_data, translated)
+            self.callbacks.on_log(
+                f"⚡ Перевод {mod_name} [Книга JSON] — {len(pending)} строк",
+                "magenta",
+            )
+            translated = self.service.translate_dict(
+                pending,
+                target_lang,
+                self.callbacks,
+                context=mod_name,
+            )
 
-        payload = json.dumps(en_data, ensure_ascii=False, indent=2).encode("utf-8")
+        output_data = build_book_json_output(en_data, preserved, translated)
+        payload = json.dumps(
+            output_data,
+            ensure_ascii=False,
+            indent=2,
+        ).encode("utf-8")
         if output_mode == "resourcepack" and pack_writer:
             pack_writer.write(tr_path, payload)
             return True
@@ -311,123 +365,98 @@ class JarProcessor:
     ) -> bool:
         fl = item.filename.lower()
         tr_path = (
-            re.sub(r"/en_us/", f"/{target_lang['file']}/", item.filename, flags=re.IGNORECASE)
+            re.sub(
+                r"/en_us/",
+                f"/{target_lang['file']}/",
+                item.filename,
+                flags=re.IGNORECASE,
+            )
             if "/en_us/" in fl
             else item.filename
         )
         tr_key = tr_path.lower()
-        target_regex = target_lang["regex"]
-        # --- ФИКС ДЛЯ КНИГ MD (Защита оригинального перевода) ---
-        if mode == "append" and tr_key in locale_files:
-            if output_mode == "resourcepack" and pack_writer:
-                pack_writer.write(tr_path, zin.read(locale_files[tr_key]))
-            elif output_mode == "inplace" and zout:
-                zout.writestr(tr_path, zin.read(locale_files[tr_key]))
-                written_inplace.add(tr_path)
-            return True
-        # --------------------------------------------------------
         try:
             en_text = zin.read(item).decode("utf-8-sig", errors="ignore")
         except OSError:
             return False
 
-        if self.service.config.getboolean("GENERAL", "smart_glue"):
-            en_text = apply_smart_glue(en_text)
-
         tr_text = ""
-        if tr_key in locale_files:
-            tr_text = zin.read(locale_files[tr_key]).decode("utf-8-sig", errors="ignore")
-        tr_lines = tr_text.split("\n") if tr_text else []
+        if mode != "force" and tr_key in locale_files:
+            try:
+                tr_text = zin.read(locale_files[tr_key]).decode(
+                    "utf-8-sig",
+                    errors="ignore",
+                )
+            except OSError:
+                tr_text = ""
 
-        pending: dict[str, str] = {}
-        title_meta: dict[str, tuple[str, str]] = {}
-        lines_out: list[str] = []
-        in_yaml = False
-
-        for idx, line in enumerate(en_text.split("\n")):
-            stripped = line.strip()
-            if stripped == "---":
-                in_yaml = not in_yaml
-                lines_out.append(line)
-                continue
-
-            if in_yaml:
-                if stripped.lower().startswith("title:"):
-                    match = re.match(r'^(\s*title\s*:\s*[\'"]?)(.*?)([\'"]?)$', line, re.IGNORECASE)
-                    if match and looks_like_source_language(match.group(2)):
-                        prefix, title, suffix = match.groups()
-                        title_meta[str(idx)] = (prefix, suffix)
-                        if mode == "append" and idx < len(tr_lines) and already_translated(tr_lines[idx], target_regex):
-                            lines_out.append(tr_lines[idx])
-                        else:
-                            lines_out.append(line)
-                            pending[str(idx)] = title
-                    else:
-                        lines_out.append(line)
-                else:
-                    lines_out.append(line)
-                continue
-
-            if stripped.startswith("<") or stripped.startswith("!["):
-                lines_out.append(line)
-                continue
-            if not stripped or not looks_like_source_language(line) or is_technical_term(line):
-                lines_out.append(line)
-                continue
-
-            if mode == "append" and idx < len(tr_lines) and tr_lines[idx].strip() and already_translated(tr_lines[idx], target_regex):
-                lines_out.append(tr_lines[idx])
-            else:
-                lines_out.append(line)
-                pending[str(idx)] = line
-
-        # --- ФИКС 2: Режим пропуска (skip) ---
-        total_translatable = sum(
-            1 for line in en_text.split("\n")
-            if line.strip()
-            and not line.strip().startswith("<")
-            and not line.strip().startswith("![")
-            and looks_like_source_language(line)
-            and not is_technical_term(line)
+        selection = collect_book_markdown_selection(
+            en_text,
+            tr_text,
+            mode,
+            smart_glue=self.service.config.getboolean(
+                "GENERAL",
+                "smart_glue",
+            ),
         )
-        
-        if mode == "skip" and total_translatable > 0 and len(pending) <= total_translatable * 0.1:
-            if tr_key in locale_files:
-                raw = zin.read(locale_files[tr_key])
-                if output_mode == "resourcepack" and pack_writer:
-                    pack_writer.write(tr_path, raw)
-                    return True
-                elif zout:
-                    zout.writestr(tr_path, raw)
-                    written_inplace.add(tr_path)
-                    return True
+        if selection.total_translatable == 0:
+            if tr_key in locale_files and mode != "force":
+                return self._copy_existing(
+                    zin,
+                    locale_files,
+                    tr_key,
+                    tr_path,
+                    output_mode,
+                    pack_writer,
+                    {},
+                    {},
+                    mode,
+                )
             return False
-        # --------------------------------------
 
-        if not pending:
-            payload = "\n".join(lines_out).encode("utf-8")
-            if output_mode == "resourcepack" and pack_writer:
-                pack_writer.write(tr_path, payload)
-            elif zout:
-                zout.writestr(tr_path, payload)
-                written_inplace.add(tr_path)
-            return True  # <--- ФИКС 1: Возвращаем True вместо bool(pending)
+        if mode == "skip" and skip_threshold_reached(
+            selection.total_translatable,
+            len(selection.pending),
+        ):
+            return self._copy_existing(
+                zin,
+                locale_files,
+                tr_key,
+                tr_path,
+                output_mode,
+                pack_writer,
+                {},
+                {},
+                mode,
+            )
 
-        self.callbacks.on_log(f"⚡ Перевод {mod_name} [Книга MD] — {len(pending)} строк", "magenta")
-        translated = self.service.translate_dict(pending, target_lang, self.callbacks, context=mod_name)
-        for idx_s, value in translated.items():
-            idx = int(idx_s)
-            if idx_s in title_meta:
-                prefix, suffix = title_meta[idx_s]
-                lines_out[idx] = prefix + value + suffix
-            else:
-                lines_out[idx] = value
+        if selection.pending:
+            self.callbacks.on_log(
+                f"⚡ Перевод {mod_name} [Книга MD] — "
+                f"{len(selection.pending)} строк",
+                "magenta",
+            )
+            translated = self.service.translate_dict(
+                selection.pending,
+                target_lang,
+                self.callbacks,
+                context=mod_name,
+            )
+            for index_text, value in translated.items():
+                index = int(index_text)
+                if index_text in selection.title_meta:
+                    prefix, suffix = selection.title_meta[index_text]
+                    selection.lines_out[index] = prefix + value + suffix
+                else:
+                    selection.lines_out[index] = value
 
-        payload = "\n".join(lines_out).encode("utf-8")
+        payload = "\n".join(selection.lines_out).encode("utf-8")
         if output_mode == "resourcepack" and pack_writer:
             pack_writer.write(tr_path, payload)
             return True
         if zout:
             zout.writestr(tr_path, payload)
             written_inplace.add(tr_path)
-        return True
+            return True
+        return False
+

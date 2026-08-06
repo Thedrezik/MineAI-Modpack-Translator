@@ -6,7 +6,11 @@ from mineai.engines.service import TranslationService
 from mineai.io_utils import atomic_write_bytes
 from mineai.json_utils import load_lenient_json
 from mineai.output.pack_writer import PackWriter
-from mineai.processors.locale_keys import collect_lang_keys_to_translate, count_translatable_lang_entries
+from mineai.processors.locale_keys import (
+    collect_lang_keys_to_translate,
+    count_translatable_lang_entries,
+)
+from mineai.processors.selection import skip_threshold_reached
 from mineai.runtime.state import JobState
 
 
@@ -46,7 +50,7 @@ class LooseJsonProcessor:
         total = count_translatable_lang_entries(en_data)
         label = "Словарь: " + os.path.basename(os.path.dirname(os.path.dirname(file_path)))
 
-        if mode == "skip" and total and (total - len(pending)) >= total * 0.9:
+        if mode == "skip" and skip_threshold_reached(total, len(pending)):
             if output_mode == "resourcepack" and pack_writer and os.path.exists(tr_disk):
                 with open(tr_disk, "rb") as f:
                     pack_writer.write(tr_internal, f.read())
@@ -59,16 +63,17 @@ class LooseJsonProcessor:
 
         if pending:
             self.callbacks.on_log(f"⚡ Перевод {label} — {len(pending)} строк", "cyan")
-            # ДОБАВЛЕНО: prompt_type="books"
             translated = self.service.translate_dict(
-                pending, target_lang, self.callbacks, context="Локализация Квестов/Скриптов", prompt_type="books"
+                pending,
+                target_lang,
+                self.callbacks,
+                context="Локализация Квестов/Скриптов",
+                prompt_type="books",
             )
-            
-            # --- НОВАЯ ПРОВЕРКА ОТМЕНЫ ---
+
             if not self.state.should_run():
                 return
-            # -----------------------------
-            
+
             merged.update(translated)
 
         payload = json.dumps(merged, ensure_ascii=False, indent=2).encode("utf-8")

@@ -1,5 +1,3 @@
-import re
-
 from mineai.text_processing import is_technical_term, looks_like_source_language
 
 
@@ -9,22 +7,19 @@ def collect_lang_keys_to_translate(
     mode: str,
     target_regex: str,
 ) -> dict[str, str]:
-    """Return lang file keys that still need translation."""
+    """Return filtered locale keys that need translation for the selected mode."""
+    _ = target_regex  # Kept in the public signature for call-site compatibility.
+
     pending: dict[str, str] = {}
     for key, value in en_data.items():
         if not isinstance(value, str) or not value.strip():
             continue
-        if is_technical_term(value):
-            continue
-        if not looks_like_source_language(value):
+        if is_technical_term(value) or not looks_like_source_language(value):
             continue
 
-        existing = tr_data.get(key) if isinstance(tr_data.get(key), str) else ""
-        if mode == "append" and existing.strip() and existing != value:
-            continue
-        if mode == "append" and existing.strip() == value:
-            pending[key] = value
-        elif mode != "append" or not existing.strip():
+        existing_value = tr_data.get(key)
+        existing = existing_value if isinstance(existing_value, str) else ""
+        if mode == "force" or not existing.strip() or existing == value:
             pending[key] = value
     return pending
 
@@ -32,6 +27,9 @@ def collect_lang_keys_to_translate(
 def count_translatable_lang_entries(en_data: dict) -> int:
     return sum(
         1
-        for v in en_data.values()
-        if isinstance(v, str) and looks_like_source_language(v) and not is_technical_term(v)
+        for value in en_data.values()
+        if isinstance(value, str)
+        and value.strip()
+        and looks_like_source_language(value)
+        and not is_technical_term(value)
     )
