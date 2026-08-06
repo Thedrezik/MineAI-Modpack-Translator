@@ -50,6 +50,7 @@ class JarInplaceSafetyTests(unittest.TestCase):
             path = os.path.join(directory, "example.jar")
             _write_jar(path)
             os.chmod(path, 0o640)
+            expected_mode = stat.S_IMODE(os.stat(path).st_mode)
 
             JarProcessor(_Service(), state, _callbacks(logs)).process(
                 path,
@@ -68,7 +69,10 @@ class JarInplaceSafetyTests(unittest.TestCase):
                     archive.read("assets/example/lang/ru_ru.json").decode("utf-8")
                 )
                 self.assertEqual(translated["example.hello"], "Привет")
-            self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o640)
+            self.assertEqual(
+                stat.S_IMODE(os.stat(path).st_mode),
+                expected_mode,
+            )
             self.assertFalse(os.path.exists(path + ".temp"))
 
     def test_validation_failure_preserves_original_jar(self):
