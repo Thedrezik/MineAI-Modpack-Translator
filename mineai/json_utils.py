@@ -1,8 +1,96 @@
 import json
-import re
 from typing import Any, Iterator
 
 from mineai.constants import KEYS_TO_TRANSLATE
+
+
+def _strip_json_comments(text: str) -> str:
+    """Remove // and /* */ comments only when they are outside JSON strings."""
+    out: list[str] = []
+    i = 0
+    in_string = False
+    escaped = False
+
+    while i < len(text):
+        char = text[i]
+
+        if in_string:
+            out.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            i += 1
+            continue
+
+        if char == '"':
+            in_string = True
+            out.append(char)
+            i += 1
+            continue
+
+        if char == "/" and i + 1 < len(text):
+            next_char = text[i + 1]
+            if next_char == "/":
+                i += 2
+                while i < len(text) and text[i] not in "\r\n":
+                    i += 1
+                continue
+            if next_char == "*":
+                i += 2
+                while i + 1 < len(text) and text[i : i + 2] != "*/":
+                    i += 1
+                if i + 1 < len(text):
+                    i += 2
+                continue
+
+        out.append(char)
+        i += 1
+
+    return "".join(out)
+
+
+def _strip_trailing_commas(text: str) -> str:
+    """Remove trailing commas before ] or } only when outside JSON strings."""
+    out: list[str] = []
+    i = 0
+    in_string = False
+    escaped = False
+
+    while i < len(text):
+        char = text[i]
+
+        if in_string:
+            out.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            i += 1
+            continue
+
+        if char == '"':
+            in_string = True
+            out.append(char)
+            i += 1
+            continue
+
+        if char == ",":
+            lookahead = i + 1
+            while lookahead < len(text) and text[lookahead].isspace():
+                lookahead += 1
+            if lookahead < len(text) and text[lookahead] in "]}":
+                i += 1
+                continue
+
+        out.append(char)
+        i += 1
+
+    return "".join(out)
 
 
 def load_lenient_json(raw: bytes | str) -> Any:
@@ -10,9 +98,8 @@ def load_lenient_json(raw: bytes | str) -> Any:
         text = raw.decode("utf-8-sig", errors="ignore")
     else:
         text = raw
-    text = re.sub(r"/\*.*?\*/", "", text, flags=re.DOTALL)
-    text = re.sub(r"(?m)^\s*//.*$", "", text)
-    text = re.sub(r",\s*([\]}])", r"\1", text)
+    text = _strip_json_comments(text)
+    text = _strip_trailing_commas(text)
     return json.loads(text)
 
 
@@ -28,7 +115,6 @@ def key_to_path(key: str) -> tuple:
         else:
             parts.append(part)
     return tuple(parts)
-
 
 
 def set_at_path(data: Any, path: tuple, value: Any) -> None:
