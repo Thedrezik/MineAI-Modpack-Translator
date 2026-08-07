@@ -4,7 +4,7 @@ import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from mineai.engines.base import EngineCallbacks, EngineItem, TranslationEngine
-from mineai.engines.http_retry import request_with_retry
+from mineai.engines.http_retry import RequestCancelled, request_with_retry
 from mineai.text_processing import polish_translation, unmask_translation
 
 
@@ -29,6 +29,8 @@ class GoogleEngine(TranslationEngine):
                 should_continue=should_continue,
             )
             return "".join(part[0] for part in response.json()[0] if part[0])
+        except RequestCancelled:
+            raise
         except (requests.RequestException, KeyError, IndexError, ValueError, TypeError):
             return None
 
@@ -70,7 +72,10 @@ class GoogleEngine(TranslationEngine):
                 callbacks.wait_if_paused()
                 if not callbacks.should_run():
                     break
-                key, raw = fut.result()
+                try:
+                    key, raw = fut.result()
+                except RequestCancelled:
+                    break
                 if raw:
                     result[key] = self._finalize(raw, items[key])
         return result
@@ -117,7 +122,10 @@ class GoogleEngine(TranslationEngine):
                 callbacks.wait_if_paused()
                 if not callbacks.should_run():
                     break
-                chunk_keys, parts = fut.result()
+                try:
+                    chunk_keys, parts = fut.result()
+                except RequestCancelled:
+                    break
                 if parts:
                     for idx, key in enumerate(chunk_keys):
                         result[key] = self._finalize(parts[idx].strip(), items[key])
@@ -125,14 +133,18 @@ class GoogleEngine(TranslationEngine):
                     for key in chunk_keys:
                         if not callbacks.should_run():
                             break
-                        single = self._request(
-                            items[key].masked,
-                            api_code,
-                            timeout=5,
-                            on_log=callbacks.on_log,
-                            should_continue=callbacks.should_run,
-                        )
+                        try:
+                            single = self._request(
+                                items[key].masked,
+                                api_code,
+                                timeout=5,
+                                on_log=callbacks.on_log,
+                                should_continue=callbacks.should_run,
+                            )
+                        except RequestCancelled:
+                            break
                         if single:
                             result[key] = self._finalize(single, items[key])
-                        time.sleep(0.3)
+                        if callbacks.should_run():
+                            time.sleep(0.3)
         return result

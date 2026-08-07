@@ -13,7 +13,7 @@ DEFAULT_ATTEMPTS = 4
 DEFAULT_BASE_DELAY = 1.0
 
 
-class RequestCancelled(requests.RequestException):
+class RequestCancelled(Exception):
     """Raised when the active translation job is cancelled between HTTP attempts."""
 
 

@@ -29,6 +29,8 @@ class OpenRouterEngine(BatchLlmEngine):
         self._on_log = callbacks.on_log
         try:
             return super().translate_batch(items, target_lang, callbacks)
+        except RequestCancelled:
+            return {}
         finally:
             self._should_continue = None
             self._on_log = None
@@ -62,7 +64,7 @@ class OpenRouterEngine(BatchLlmEngine):
                 should_continue=self._should_continue,
             )
         except RequestCancelled:
-            return None
+            raise
         except requests.RequestException as exc:
             if active_log: active_log(f"❌ OpenRouter сеть: {exc}", "red")
             return None
