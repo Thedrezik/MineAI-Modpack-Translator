@@ -1,0 +1,62 @@
+name: PR34 test sync
+
+on:
+  push:
+    branches:
+      - fix/beta-release-blockers
+
+permissions:
+  contents: write
+
+jobs:
+  sync-tests:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/beta-release-blockers
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: pip
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Update only stale LLM tests
+        shell: python
+        run: |
+          from pathlib import Path
+
+          path = Path('tests/test_llm_common.py')
+          text = path.read_text(encoding='utf-8')
+
+          old_prompt = '''        self.assertIn("every [#N#] placeholder", prompt)\n        self.assertIn("Do not add, remove, duplicate, or rename", prompt)'''
+          new_prompt = '''        self.assertIn("Preserve ALL [#N#] placeholders exactly", prompt)\n        self.assertIn("MARKER WHITELIST", prompt)\n        self.assertIn('"key": [#0#] [#1#]', prompt)\n        self.assertIn("no skips, no renumbering, no repeats", prompt)'''
+          if text.count(old_prompt) != 2:
+              raise SystemExit(f'prompt assertion block count={text.count(old_prompt)}')
+          text = text.replace(old_prompt, new_prompt)
+
+          old_added = '''    def test_rejects_an_added_placeholder(self) -> None:\n        responses = iter(\n            [\n                json.dumps({"key": "Значение [#9#]"}, ensure_ascii=False),\n                json.dumps({"key": "Значение"}, ensure_ascii=False),\n            ]\n        )\n        engine = BatchLlmEngine(call_api=lambda _prompt, _limit: next(responses))\n        items = {"key": EngineItem("key", "Value", "Value")}\n\n        result = engine.translate_batch(items, TARGET_LANG, callbacks())\n\n        self.assertEqual(result["key"], "Значение")'''
+          new_added = '''    def test_rejects_an_added_placeholder(self) -> None:\n        api_calls: list[str] = []\n\n        def call_api(prompt: str, _limit: int) -> str:\n            api_calls.append(prompt)\n            if "BROKEN TRANSLATION:" in prompt:\n                return json.dumps({"key": "Значение"}, ensure_ascii=False)\n            normal_calls = [p for p in api_calls if "BROKEN TRANSLATION:" not in p]\n            if len(normal_calls) == 1:\n                return json.dumps({"key": "Значение [#9#]"}, ensure_ascii=False)\n            return json.dumps({"key": "Значение"}, ensure_ascii=False)\n\n        engine = BatchLlmEngine(call_api=call_api)\n        items = {"key": EngineItem("key", "Value", "Value")}\n\n        result = engine.translate_batch(items, TARGET_LANG, callbacks())\n\n        self.assertEqual(result["key"], "Значение")\n        self.assertEqual(sum("BROKEN TRANSLATION:" in p for p in api_calls), 1)\n        self.assertEqual(sum("BROKEN TRANSLATION:" not in p for p in api_calls), 2)'''
+          if text.count(old_added) != 1:
+              raise SystemExit(f'added-placeholder block count={text.count(old_added)}')
+          text = text.replace(old_added, new_added)
+
+          old_dup = '''    def test_rejects_a_duplicated_placeholder(self) -> None:\n        responses = iter(\n            [\n                json.dumps({"key": "Значение [#0#] [#0#]"}, ensure_ascii=False),\n                json.dumps({"key": "Значение [#0#]"}, ensure_ascii=False),\n            ]\n        )\n        engine = BatchLlmEngine(call_api=lambda _prompt, _limit: next(responses))\n        items = {\n            "key": EngineItem(\n                "key",\n                "Value %s",\n                "Value [#0#]",\n                {"[#0#]": "%s"},\n            )\n        }\n\n        result = engine.translate_batch(items, TARGET_LANG, callbacks())\n\n        self.assertEqual(result["key"], "Значение %s")'''
+          new_dup = '''    def test_rejects_a_duplicated_placeholder(self) -> None:\n        api_calls: list[str] = []\n\n        def call_api(prompt: str, _limit: int) -> str:\n            api_calls.append(prompt)\n            if "BROKEN TRANSLATION:" in prompt:\n                return json.dumps({"key": "Значение [#0#]"}, ensure_ascii=False)\n            normal_calls = [p for p in api_calls if "BROKEN TRANSLATION:" not in p]\n            if len(normal_calls) == 1:\n                return json.dumps(\n                    {"key": "Значение [#0#] [#0#]"}, ensure_ascii=False\n                )\n            return json.dumps({"key": "Значение [#0#]"}, ensure_ascii=False)\n\n        engine = BatchLlmEngine(call_api=call_api)\n        items = {\n            "key": EngineItem(\n                "key",\n                "Value %s",\n                "Value [#0#]",\n                {"[#0#]": "%s"},\n            )\n        }\n\n        result = engine.translate_batch(items, TARGET_LANG, callbacks())\n\n        self.assertEqual(result["key"], "Значение %s")\n        self.assertEqual(sum("BROKEN TRANSLATION:" in p for p in api_calls), 1)\n        self.assertEqual(sum("BROKEN TRANSLATION:" not in p for p in api_calls), 2)'''
+          if text.count(old_dup) != 1:
+              raise SystemExit(f'duplicated-placeholder block count={text.count(old_dup)}')
+          text = text.replace(old_dup, new_dup)
+          path.write_text(text, encoding='utf-8', newline='\n')
+      - name: Compile and test
+        run: |
+          python -m compileall -q mineai tests translator.py
+          python -m unittest discover -s tests -v
+      - name: Commit validated test update and remove temporary workflow
+        run: |
+          rm .github/workflows/pr34-test-sync.yml
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add tests/test_llm_common.py .github/workflows/pr34-test-sync.yml
+          git commit -m "test(llm): align marker tests with repair flow"
+          git push origin HEAD:fix/beta-release-blockers
