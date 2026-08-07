@@ -81,8 +81,10 @@ class BatchLlmEngineTests(unittest.TestCase):
             context="",
         )
 
-        self.assertIn("every [#N#] placeholder", prompt)
-        self.assertIn("Do not add, remove, duplicate, or rename", prompt)
+        self.assertIn("Preserve ALL [#N#] placeholders exactly", prompt)
+        self.assertIn("MARKER WHITELIST", prompt)
+        self.assertIn('"key": [#0#] [#1#]', prompt)
+        self.assertIn("no skips, no renumbering, no repeats", prompt)
 
     def test_context_prompt_requires_all_numbered_placeholders(self) -> None:
         prompt = build_translation_prompt(
@@ -92,8 +94,10 @@ class BatchLlmEngineTests(unittest.TestCase):
             context="Example Mod",
         )
 
-        self.assertIn("every [#N#] placeholder", prompt)
-        self.assertIn("Do not add, remove, duplicate, or rename", prompt)
+        self.assertIn("Preserve ALL [#N#] placeholders exactly", prompt)
+        self.assertIn("MARKER WHITELIST", prompt)
+        self.assertIn('"key": [#0#] [#1#]', prompt)
+        self.assertIn("no skips, no renumbering, no repeats", prompt)
 
     def test_retries_only_a_missing_key(self) -> None:
         calls: list[dict[str, str]] = []
@@ -226,27 +230,41 @@ class BatchLlmEngineTests(unittest.TestCase):
         self.assertNotIn("key", result)
 
     def test_rejects_an_added_placeholder(self) -> None:
-        responses = iter(
-            [
-                json.dumps({"key": "Значение [#9#]"}, ensure_ascii=False),
-                json.dumps({"key": "Значение"}, ensure_ascii=False),
-            ]
-        )
-        engine = BatchLlmEngine(call_api=lambda _prompt, _limit: next(responses))
+        api_calls: list[str] = []
+
+        def call_api(prompt: str, _limit: int) -> str:
+            api_calls.append(prompt)
+            if "BROKEN TRANSLATION:" in prompt:
+                return json.dumps({"key": "Значение"}, ensure_ascii=False)
+            normal_calls = [p for p in api_calls if "BROKEN TRANSLATION:" not in p]
+            if len(normal_calls) == 1:
+                return json.dumps({"key": "Значение [#9#]"}, ensure_ascii=False)
+            return json.dumps({"key": "Значение"}, ensure_ascii=False)
+
+        engine = BatchLlmEngine(call_api=call_api)
         items = {"key": EngineItem("key", "Value", "Value")}
 
         result = engine.translate_batch(items, TARGET_LANG, callbacks())
 
         self.assertEqual(result["key"], "Значение")
+        self.assertEqual(sum("BROKEN TRANSLATION:" in p for p in api_calls), 1)
+        self.assertEqual(sum("BROKEN TRANSLATION:" not in p for p in api_calls), 2)
 
     def test_rejects_a_duplicated_placeholder(self) -> None:
-        responses = iter(
-            [
-                json.dumps({"key": "Значение [#0#] [#0#]"}, ensure_ascii=False),
-                json.dumps({"key": "Значение [#0#]"}, ensure_ascii=False),
-            ]
-        )
-        engine = BatchLlmEngine(call_api=lambda _prompt, _limit: next(responses))
+        api_calls: list[str] = []
+
+        def call_api(prompt: str, _limit: int) -> str:
+            api_calls.append(prompt)
+            if "BROKEN TRANSLATION:" in prompt:
+                return json.dumps({"key": "Значение [#0#]"}, ensure_ascii=False)
+            normal_calls = [p for p in api_calls if "BROKEN TRANSLATION:" not in p]
+            if len(normal_calls) == 1:
+                return json.dumps(
+                    {"key": "Значение [#0#] [#0#]"}, ensure_ascii=False
+                )
+            return json.dumps({"key": "Значение [#0#]"}, ensure_ascii=False)
+
+        engine = BatchLlmEngine(call_api=call_api)
         items = {
             "key": EngineItem(
                 "key",
@@ -259,6 +277,8 @@ class BatchLlmEngineTests(unittest.TestCase):
         result = engine.translate_batch(items, TARGET_LANG, callbacks())
 
         self.assertEqual(result["key"], "Значение %s")
+        self.assertEqual(sum("BROKEN TRANSLATION:" in p for p in api_calls), 1)
+        self.assertEqual(sum("BROKEN TRANSLATION:" not in p for p in api_calls), 2)
 
     def test_accepts_spaced_placeholder_syntax_used_by_unmasking(self) -> None:
         engine = BatchLlmEngine(
