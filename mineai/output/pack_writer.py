@@ -134,6 +134,10 @@ class PackWriter:
         self._close_handles()
         self._remove_output_archives()
 
+    def abort(self) -> None:
+        """Close and remove archives created by an incomplete translation job."""
+        self._cleanup_partial_archives()
+
     def close(self) -> tuple[str | None, str | None]:
         rp, dp = self.rp_zip_path, self.dp_zip_path
         errors = self._close_handles()
