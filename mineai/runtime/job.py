@@ -97,18 +97,6 @@ class TranslationJob:
         elif name == "protected":
             self.state.mark_protected(count)
 
-    def _on_metric(self, name: str, count: int = 1) -> None:
-        if name == "ok":
-            self.state.mark_ok(count)
-        elif name == "failed":
-            self.state.mark_failed(count)
-        elif name == "cached":
-            self.state.mark_cached(count)
-        elif name == "fallback":
-            self.state.mark_fallback(count)
-        elif name == "protected":
-            self.state.mark_protected(count)
-
     def _callbacks(self) -> EngineCallbacks:
         return EngineCallbacks(
             should_run=self.state.should_run,
@@ -209,6 +197,7 @@ class TranslationJob:
 
         pack_writer: PackWriter | None = None
         failed = False
+        processing_failed = False
         failed_files = 0
         total_items = len(jars) + len(loose) + len(snbt) + len(bq_files)
         done = 0
@@ -333,6 +322,7 @@ class TranslationJob:
                 )
         except Exception:
             failed = True
+            processing_failed = True
             self.on_log(
                 f"\n❌ КРИТИЧЕСКАЯ ОШИБКА:\n{traceback.format_exc()}",
                 "red",
@@ -349,7 +339,10 @@ class TranslationJob:
 
             if pack_writer:
                 try:
-                    pack_writer.close()
+                    if processing_failed or not self.state.should_run():
+                        pack_writer.abort()
+                    else:
+                        pack_writer.close()
                 except Exception:
                     failed = True
                     self.on_log(
