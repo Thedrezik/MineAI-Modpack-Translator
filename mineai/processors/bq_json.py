@@ -5,10 +5,9 @@ import shutil
 from mineai.engines.base import EngineCallbacks
 from mineai.engines.service import TranslationService
 from mineai.io_utils import atomic_write_text
-from mineai.processors.selection import (
-    collect_bq_selection,
-    skip_threshold_reached,
-)
+from mineai.language_validation import uses_same_latin_script
+from mineai.processors.selection import skip_threshold_reached
+from mineai.processors.translation_state import collect_bq_selection_with_baseline
 from mineai.runtime.state import JobState
 
 
@@ -34,10 +33,20 @@ class BQProcessor:
         with open(source_path, "r", encoding="utf-8") as source_file:
             data = json.load(source_file)
 
-        selection = collect_bq_selection(
+        original_data = None
+        if mode != "force" and os.path.exists(backup):
+            try:
+                with open(backup, "r", encoding="utf-8") as backup_file:
+                    original_data = json.load(backup_file)
+            except (OSError, json.JSONDecodeError):
+                original_data = None
+
+        selection = collect_bq_selection_with_baseline(
             data,
             mode,
             target_lang["regex"],
+            original_data=original_data,
+            same_latin_script=uses_same_latin_script(target_lang),
         )
         if not selection.pending:
             return

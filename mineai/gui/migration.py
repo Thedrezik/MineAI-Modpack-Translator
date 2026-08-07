@@ -77,6 +77,13 @@ class MigrationWindow(ctk.CTkToplevel):
 
         self.btn_run.configure(state="disabled", text="Выполнение...")
         cache_type = self.var_cache.get()
+        finished = threading.Event()
+
+        def poll_finished() -> None:
+            if finished.is_set():
+                self.destroy()
+                return
+            self.after(50, poll_finished)
 
         def task():
             try:
@@ -93,6 +100,7 @@ class MigrationWindow(ctk.CTkToplevel):
                     else:
                         self.cache_std.load_imported_caches()
             finally:
-                self.after(0, self.destroy)
+                finished.set()
 
-        threading.Thread(target=task, daemon=True).start()
+        self.after(50, poll_finished)
+        threading.Thread(target=task, daemon=False).start()

@@ -5,11 +5,10 @@ import shutil
 from mineai.engines.base import EngineCallbacks
 from mineai.engines.service import TranslationService
 from mineai.io_utils import atomic_write_text
-from mineai.processors.selection import (
-    collect_snbt_selection,
-    skip_threshold_reached,
-)
+from mineai.language_validation import uses_same_latin_script
+from mineai.processors.selection import skip_threshold_reached
 from mineai.processors.snbt_extract import apply_snbt_translations
+from mineai.processors.translation_state import collect_snbt_selection_with_baseline
 from mineai.runtime.state import JobState
 
 
@@ -94,11 +93,12 @@ class SnbtProcessor:
         with open(current_path, encoding="utf-8") as current_file:
             current_content = current_file.read()
 
-        selection = collect_snbt_selection(
+        selection = collect_snbt_selection_with_baseline(
             original_content,
             current_content,
             mode,
             target_lang["regex"],
+            same_latin_script=uses_same_latin_script(target_lang),
         )
         if not selection.pending:
             return

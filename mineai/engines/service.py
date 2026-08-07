@@ -8,6 +8,10 @@ from mineai.engines.deepl import DeepLEngine
 from mineai.engines.google import GoogleEngine
 from mineai.engines.kobold import KoboldEngine
 from mineai.engines.openrouter import OpenRouterEngine
+from mineai.language_validation import (
+    requires_target_script_marker,
+    uses_same_latin_script,
+)
 from mineai.text_processing import (
     PLACEHOLDER_PATTERN,
     apply_smart_glue,
@@ -89,8 +93,13 @@ def _validate_candidate(
         if _can_cache_identity(item.original):
             return True, None, True
         return False, "ответ совпадает с оригиналом", False
-    if not re.search(target_lang["regex"], candidate):
+    if (
+        requires_target_script_marker(target_lang)
+        and not re.search(target_lang["regex"], candidate)
+    ):
         return False, "нет символов целевого языка", False
+    if uses_same_latin_script(target_lang) and _CJK_PATTERN.search(candidate):
+        return False, "CJK-символы в латинском переводе", False
     if target_lang["api"] == "ru" and _CJK_PATTERN.search(candidate):
         return False, "CJK-символы в русском переводе", False
     return True, None, False

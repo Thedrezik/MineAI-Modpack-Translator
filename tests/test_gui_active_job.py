@@ -229,7 +229,6 @@ class TranslatorAppJobLifecycleTests(unittest.TestCase):
             [mock.call(state="disabled"), mock.call(state="normal")],
         )
 
-
     def test_open_log_file_uses_cross_platform_opener(self) -> None:
         app = self._bare_app()
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -250,7 +249,7 @@ class TranslatorAppJobLifecycleTests(unittest.TestCase):
         self.assertEqual(popen.call_args.args[0][0], "xdg-open")
         app.log.assert_not_called()
 
-    def test_migration_window_schedules_destroy_on_ui_thread(self) -> None:
+    def test_migration_window_polls_completion_on_ui_thread(self) -> None:
         migration_module = sys.modules[gui_app.MigrationWindow.__module__]
         window = object.__new__(gui_app.MigrationWindow)
         window.ent_zip = SimpleNamespace(get=lambda: "/tmp/translations.zip")
@@ -278,10 +277,21 @@ class TranslatorAppJobLifecycleTests(unittest.TestCase):
             window._run()
 
         self.assertTrue(created_threads[0].started)
+        self.assertFalse(created_threads[0].daemon)
         window.destroy.assert_not_called()
+        self.assertEqual(window.after.call_count, 1)
+        delay, poll_finished = window.after.call_args.args
+        self.assertEqual(delay, 50)
+
         created_threads[0].target()
+
+        # The worker only flips a threading.Event; it must not touch Tk.
+        self.assertEqual(window.after.call_count, 1)
         window.destroy.assert_not_called()
-        window.after.assert_called_once_with(0, window.destroy)
+
+        poll_finished()
+        window.destroy.assert_called_once_with()
+        self.assertEqual(window.after.call_count, 1)
 
 
 if __name__ == "__main__":
