@@ -18,6 +18,7 @@ class OpenRouterEngine(BatchLlmEngine):
         self.site_url = site_url.strip()
         self.app_name = app_name.strip() or "MineAI Translator"
         self._should_continue = None
+        self._on_log = None
         super().__init__(
             mode=mode, context=context, prompt_type=prompt_type,
             call_api=self._request, label="OpenRouter", retries=retries,
@@ -25,10 +26,12 @@ class OpenRouterEngine(BatchLlmEngine):
 
     def translate_batch(self, items, target_lang, callbacks):
         self._should_continue = callbacks.should_run
+        self._on_log = callbacks.on_log
         try:
             return super().translate_batch(items, target_lang, callbacks)
         finally:
             self._should_continue = None
+            self._on_log = None
 
     def _headers(self) -> dict[str, str]:
         headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
@@ -37,6 +40,8 @@ class OpenRouterEngine(BatchLlmEngine):
         return headers
 
     def _request(self, prompt: str, max_tokens: int, on_log=None) -> str | None:
+        active_log = on_log or self._on_log
+
         def openrouter_delay(attempt: int, exc: Exception) -> float:
             if isinstance(exc, requests.HTTPError) and exc.response is not None and exc.response.status_code == 429:
                 return 15.0 * attempt
@@ -52,24 +57,25 @@ class OpenRouterEngine(BatchLlmEngine):
                 ),
                 operation="OpenRouter",
                 attempts=4,
-                on_log=on_log,
+                on_log=active_log,
                 delay_func=openrouter_delay,
                 should_continue=self._should_continue,
             )
         except RequestCancelled:
             return None
         except requests.RequestException as exc:
-            if on_log: on_log(f"❌ OpenRouter сеть: {exc}", "red")
+            if active_log: active_log(f"❌ OpenRouter сеть: {exc}", "red")
             return None
 
         try:
             content = response.json()["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError, ValueError) as exc:
             logger.error("OpenRouter invalid JSON: %s", exc)
+            if active_log: active_log(f"❌ OpenRouter: неверный JSON ответа: {exc}", "red")
             return None
 
         if not isinstance(content, str) or not content.strip():
-            if on_log: on_log("⚠️ OpenRouter вернул пустой ответ (фильтр модели)", "yellow")
+            if active_log: active_log("⚠️ OpenRouter вернул пустой ответ (фильтр модели)", "yellow")
             return None
 
         return content.strip()
