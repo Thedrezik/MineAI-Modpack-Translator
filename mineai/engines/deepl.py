@@ -2,7 +2,7 @@ import time
 import requests
 
 from mineai.engines.base import EngineCallbacks, EngineItem, TranslationEngine
-from mineai.engines.http_retry import request_with_retry
+from mineai.engines.http_retry import RequestCancelled, request_with_retry
 from mineai.text_processing import polish_translation, unmask_translation
 
 
@@ -41,15 +41,17 @@ class DeepLEngine(TranslationEngine):
                     ),
                     operation="DeepL",
                     on_log=callbacks.on_log,
+                    should_continue=callbacks.should_run,
                 )
                 translations = response.json()["translations"]
                 for idx, key in enumerate(chunk_keys):
                     raw = translations[idx]["text"]
                     raw = unmask_translation(raw, items[key].mapping)
                     result[key] = polish_translation(raw)
+            except RequestCancelled:
+                break
             except (requests.RequestException, KeyError, IndexError, TypeError, ValueError) as exc:
                 callbacks.on_log(f"❌ Ошибка DeepL: {exc}", "red")
-                    # Ключи при сбое НЕ возвращаем: сервис сам подставит
-                    # оригинал для отсутствующих ключей — без записи в кэш
-            time.sleep(0.5)
+            if callbacks.should_run():
+                time.sleep(0.5)
         return result
