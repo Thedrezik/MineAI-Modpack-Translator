@@ -42,7 +42,7 @@ def _count_fragment(text: str, fragment: str) -> int:
 
 
 def _can_cache_identity(original: str) -> bool:
-    """True, если оставить оригинал без перевода — осознанное решение."""
+    """True only for text that is clearly technical and intentionally unchanged."""
     stripped = original.strip()
     if not stripped:
         return False
@@ -50,16 +50,7 @@ def _can_cache_identity(original: str) -> bool:
         return True
     if re.fullmatch(r"[A-Z0-9][A-Z0-9+./_:#-]{0,15}", stripped):
         return True
-    # Структурный JSON (tellraw / click-события) — это код, а не текст
-    if stripped.startswith(("[{", "{")) and '"text"' in stripped:
-        return True
-    # Структурный JSON (click-события, tellraw) — это код, а не текст
     if stripped.startswith(("{", "[{")) and '"text"' in stripped:
-        return True
-    # Имена собственные: 1-4 слов с заглавной буквы
-    if re.fullmatch(
-        r"[A-Z][A-Za-z0-9'&.-]*(?: [A-Z][A-Za-z0-9'&.-]*){0,3}", stripped
-    ):
         return True
     return False
 
@@ -161,7 +152,6 @@ class TranslationService:
             retries=retries,
         )
 
-    # ------------------------------------------------------------------
     def translate_dict(
         self,
         strings: dict[str, str],
@@ -200,8 +190,7 @@ class TranslationService:
                 failure_reasons[owner_key] = f"{source_label}: {reason}"
                 preview = repr(text)[:120] if text is not None else "None"
                 callbacks.on_log(
-                    f"❌ Отклонён {item.original[:70]!r}: {reason}; "
-                    f"ответ={preview}",
+                    f"❌ Отклонён {item.original[:70]!r}: {reason}; ответ={preview}",
                     "red",
                 )
                 return False
@@ -219,9 +208,7 @@ class TranslationService:
                 if "Google" in source_label:
                     metric("fallback", len(output_keys))
             dup = f" ×{len(output_keys)}" if len(output_keys) > 1 else ""
-            callbacks.on_log(
-                f" > {item.original[:40]} -> {text[:40]}{dup}", "dim"
-            )
+            callbacks.on_log(f" > {item.original[:40]} -> {text[:40]}{dup}", "dim")
             bump(len(output_keys))
             return True
 
@@ -236,11 +223,8 @@ class TranslationService:
                 commit(key, text, source_label)
             for key in requested:
                 if key not in engine_result and key not in accepted:
-                    failure_reasons[key] = (
-                        f"{source_label}: движок не вернул результата"
-                    )
+                    failure_reasons[key] = f"{source_label}: движок не вернул результата"
 
-        # --- Сбор pending + кэш + дедуп ---
         for key, text in strings.items():
             if not callbacks.should_run():
                 break
@@ -263,6 +247,10 @@ class TranslationService:
                     metric("ok")
                     metric("cached")
                     continue
+                callbacks.on_log(
+                    f"⚠️ Запись кэша отброшена для {text[:70]!r}: {reason}",
+                    "yellow",
+                )
                 self.cache.discard(
                     target_lang["api"], text, include_imported=is_imported
                 )
@@ -289,7 +277,7 @@ class TranslationService:
             callbacks.on_log(f"   📦 Из ресурс-паков: {imported_count}", "cyan")
         if deduplicated_count:
             callbacks.on_log(
-                f"   ♻️ Дедупликация: {deduplicated_count}", "dim"
+                f"   ♻️ Дедупликация, объединены: {deduplicated_count}", "dim"
             )
 
         if not pending or not callbacks.should_run():
@@ -321,7 +309,9 @@ class TranslationService:
             cur[key] = item
             cur_chars += tlen
             cur_ph += ph
-            if (not is_ai and len(cur) >= 50) or (is_ai and len(cur) >= self.ai_batch):
+            if (not is_ai and len(cur) >= 50) or (
+                is_ai and len(cur) >= self.ai_batch
+            ):
                 batches.append(cur)
                 cur, cur_chars, cur_ph = {}, 0, 0
         if cur:
@@ -332,13 +322,11 @@ class TranslationService:
                 break
             if len(batches) > 1:
                 callbacks.on_log(
-                    f"📦 Пачка {idx+1}/{len(batches)} ({len(batch)} строк)",
-                    "blue",
+                    f"📦 Пачка {idx+1}/{len(batches)} ({len(batch)} строк)", "blue"
                 )
             batch_result = engine.translate_batch(batch, target_lang, callbacks)
             apply_engine_result(batch, batch_result, "основной движок")
 
-        # --- Fallback ---
         failed_pending = {k: v for k, v in pending.items() if k not in accepted}
         try:
             use_fallback = self.config.getboolean("AI", "fallback_google")
@@ -357,14 +345,16 @@ class TranslationService:
             apply_engine_result(failed_pending, gt, "Google fallback")
             got = sum(1 for k in failed_pending if k in accepted)
             if got:
-                callbacks.on_log(f"   ✅ Google: {got}/{len(failed_pending)}", "green")
-            if got < len(failed_pending):
                 callbacks.on_log(
-                    f"   ⚠️ Google: не принято {len(failed_pending)-got}",
-                    "yellow",
+                    f"   ✅ Google: {got}/{len(failed_pending)}", "green"
+                )
+            if got < len(failed_pending):
+                rejected = len(failed_pending) - got
+                suffix = "строка" if rejected == 1 else "строк"
+                callbacks.on_log(
+                    f"   ⚠️ Google: не принято {rejected} {suffix}", "yellow"
                 )
 
-        # Complex fallback (gated by use_fallback)
         if is_ai and use_fallback and callbacks.should_run():
             complex_failed = {
                 k: v
@@ -383,14 +373,13 @@ class TranslationService:
                 gr = gf.translate_batch(complex_failed, target_lang, callbacks)
                 apply_engine_result(complex_failed, gr, "Google complex fallback")
 
-        # --- Failed originals ---
         for owner_key, item in pending.items():
             if owner_key in accepted:
                 continue
             output_keys = aliases[owner_key]
             reason = failure_reasons.get(owner_key, "нет результата")
             callbacks.on_log(
-                f"⚠️ Не переведено: {item.original[:90]!r}; {reason}",
+                f"⚠️ Строка не переведена: {item.original[:90]!r}; {reason}",
                 "yellow",
             )
             for k in output_keys:
