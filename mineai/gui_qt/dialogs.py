@@ -37,7 +37,7 @@ from mineai.constants import DEFAULT_OPENROUTER_MODEL, LANGUAGES
 from mineai.engines.llm_common import get_default_prompts, load_prompts, save_prompts
 from mineai.processors.migration import run_migration
 from mineai.gui_qt.bridge import MigrationSignals
-from mineai.gui_qt.i18n import LANGUAGE_LABELS, t
+from mineai.gui_qt.i18n import t
 from mineai.gui_qt.widgets import HelpMarker
 
 
@@ -90,22 +90,6 @@ class SettingsDialog(QDialog):
         self.ai_retries = self._spin_row(general_layout, t("settings.ai_retries"), config.getint("AI", "ai_retries", 3), 0, 5)
         self.google_workers = self._spin_row(general_layout, t("settings.google_workers"), config.getint("GENERAL", "google_workers", 5), 1, 10)
         self.deepl_key = self._line_row(general_layout, t("settings.deepl"), config.get("API", "deepl_key"), secret=True)
-
-        general_layout.addWidget(self._field_label(t("settings.ui_language")))
-        self.ui_language = QComboBox()
-        for code, label in LANGUAGE_LABELS.items():
-            self.ui_language.addItem(label, code)
-        language_index = self.ui_language.findData(config.get("GENERAL", "ui_language"))
-        self.ui_language.setCurrentIndex(language_index if language_index >= 0 else 0)
-        general_layout.addWidget(self.ui_language)
-
-        general_layout.addWidget(self._field_label(t("settings.theme")))
-        self.theme = QComboBox()
-        self.theme.addItem(t("theme.dark"), "Dark")
-        self.theme.addItem(t("theme.light"), "Light")
-        theme_index = self.theme.findData(config.get("GENERAL", "theme"))
-        self.theme.setCurrentIndex(theme_index if theme_index >= 0 else 0)
-        general_layout.addWidget(self.theme)
         general_layout.addStretch(1)
 
         actions = QHBoxLayout()
@@ -200,8 +184,6 @@ class SettingsDialog(QDialog):
         self.config.set_many("GENERAL", {
             "smart_glue": self.smart_glue.isChecked(),
             "google_workers": self.google_workers.value(),
-            "ui_language": self.ui_language.currentData() or "ru",
-            "theme": self.theme.currentData() or "Dark",
         })
         self.config.set_many("API", {"deepl_key": self.deepl_key.text()})
         self.on_saved()

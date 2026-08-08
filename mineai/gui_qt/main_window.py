@@ -28,6 +28,7 @@ from PyQt6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QToolButton,
     QScrollArea,
     QSpinBox,
     QPlainTextEdit,
@@ -210,6 +211,26 @@ class TranslatorQtWindow(QMainWindow):
         self.migration_button.setToolTip(t("tooltip.migration"))
         self.migration_button.clicked.connect(self._open_migration)
         layout.addWidget(self.migration_button)
+
+        layout.addSpacing(4)
+        self.interface_language = QComboBox()
+        self.interface_language.setObjectName("HeaderLanguageCombo")
+        self.interface_language.addItem("RU", "ru")
+        self.interface_language.addItem("EN", "en")
+        language_index = self.interface_language.findData(self._ui_language)
+        self.interface_language.setCurrentIndex(language_index if language_index >= 0 else 0)
+        self.interface_language.setFixedWidth(72)
+        self.interface_language.setToolTip(t("header.language_tooltip"))
+        self.interface_language.currentIndexChanged.connect(self._change_interface_language)
+        layout.addWidget(self.interface_language)
+
+        self.theme_button = QToolButton()
+        self.theme_button.setObjectName("ThemeToggle")
+        self.theme_button.setFixedSize(38, 36)
+        self.theme_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.theme_button.clicked.connect(self._toggle_theme)
+        layout.addWidget(self.theme_button)
+        self._refresh_theme_button()
         return header
 
     def _build_sidebar(self) -> QWidget:
@@ -507,7 +528,9 @@ class TranslatorQtWindow(QMainWindow):
 
     def _build_log_card(self) -> QWidget:
         card = Card(t("card.log"))
-        toolbar = QHBoxLayout()
+        toolbar = QGridLayout()
+        toolbar.setHorizontalSpacing(8)
+        toolbar.setVerticalSpacing(7)
         self.log_filter = QComboBox()
         self.log_filter.addItem(t("log.all"), "all")
         self.log_filter.addItem(t("log.translated"), "translated")
@@ -531,13 +554,18 @@ class TranslatorQtWindow(QMainWindow):
         clear.clicked.connect(self._clear_log)
         save.clicked.connect(self._save_log)
 
-        toolbar.addWidget(self.log_filter)
-        toolbar.addWidget(self.log_search, 1)
-        toolbar.addWidget(self.log_autoscroll)
-        toolbar.addStretch(1)
-        toolbar.addWidget(open_log)
-        toolbar.addWidget(clear)
-        toolbar.addWidget(save)
+        toolbar.addWidget(self.log_filter, 0, 0)
+        toolbar.addWidget(self.log_search, 0, 1)
+        toolbar.addWidget(self.log_autoscroll, 0, 2)
+        toolbar.setColumnStretch(1, 1)
+
+        log_actions = QHBoxLayout()
+        log_actions.setSpacing(7)
+        log_actions.addStretch(1)
+        log_actions.addWidget(open_log)
+        log_actions.addWidget(clear)
+        log_actions.addWidget(save)
+        toolbar.addLayout(log_actions, 1, 0, 1, 3)
         card.body.addLayout(toolbar)
 
         self.log_view = QPlainTextEdit()
@@ -647,18 +675,40 @@ class TranslatorQtWindow(QMainWindow):
         dialog.exec()
 
     def _after_settings_saved(self) -> None:
-        new_language = settings.get("GENERAL", "ui_language") or "ru"
-        new_theme = settings.get("GENERAL", "theme") or "Dark"
-        language_changed = new_language != self._ui_language
-        translator.set_language(new_language)
-        self._ui_language = translator.language
-        self._apply_theme(new_theme)
-        if language_changed:
-            QTimer.singleShot(0, self._rebuild_ui_for_locale)
-            return
         self._refresh_engine_state()
         self._refresh_system_readiness()
         self._refresh_footer()
+
+    def _change_interface_language(self, _index: int) -> None:
+        code = self.interface_language.currentData() or "ru"
+        if code == self._ui_language:
+            return
+        if self._worker and self._worker.is_alive():
+            previous = self.interface_language.findData(self._ui_language)
+            if previous >= 0:
+                self.interface_language.blockSignals(True)
+                self.interface_language.setCurrentIndex(previous)
+                self.interface_language.blockSignals(False)
+            return
+        settings.set("GENERAL", "ui_language", code)
+        translator.set_language(code)
+        self._ui_language = translator.language
+        self.setWindowTitle(f"{t('app.title')} — {__version__}")
+        QTimer.singleShot(0, self._rebuild_ui_for_locale)
+
+    def _toggle_theme(self) -> None:
+        new_theme = "Light" if self._theme_name.casefold() == "dark" else "Dark"
+        settings.set("GENERAL", "theme", new_theme)
+        self._apply_theme(new_theme)
+
+    def _refresh_theme_button(self) -> None:
+        if not hasattr(self, "theme_button"):
+            return
+        is_light = self._theme_name.casefold() == "light"
+        self.theme_button.setText("☀" if is_light else "☾")
+        self.theme_button.setToolTip(
+            t("header.theme_to_dark") if is_light else t("header.theme_to_light")
+        )
 
     def _open_prompts(self) -> None:
         if self._worker and self._worker.is_alive():
@@ -830,6 +880,7 @@ class TranslatorQtWindow(QMainWindow):
             self.settings_button,
             self.prompts_button,
             self.migration_button,
+            self.interface_language,
             self.folder_button,
             self.version_combo,
             self.language_combo,
@@ -1012,6 +1063,7 @@ class TranslatorQtWindow(QMainWindow):
         self.setStyleSheet(stylesheet)
         if hasattr(self, "segmented_progress"):
             self.segmented_progress.set_theme(self._theme_name)
+        self._refresh_theme_button()
 
     def _capture_ui_state(self) -> dict[str, object]:
         return {
@@ -1031,6 +1083,7 @@ class TranslatorQtWindow(QMainWindow):
     def _rebuild_ui_for_locale(self) -> None:
         if self._worker and self._worker.is_alive():
             return
+        self.setWindowTitle(f"{t('app.title')} — {__version__}")
         state = self._capture_ui_state()
         old = self.takeCentralWidget()
         if old is not None:

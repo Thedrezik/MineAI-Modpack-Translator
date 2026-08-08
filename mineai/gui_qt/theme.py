@@ -67,6 +67,18 @@ QPushButton:pressed { background-color: #242536; }
 QPushButton:disabled { background-color: #1A1B27; color: #5C6273; border-color: #262735; }
 QPushButton#HeaderButton { background-color: #202231; min-width: 104px; }
 QPushButton#HeaderButton:hover { background-color: #2B2D40; border-color: #555872; }
+QComboBox#HeaderLanguageCombo {
+    min-height: 34px; max-height: 34px; background-color: #202231; color: #E2E8F0;
+    border: 1px solid #393B50; border-radius: 8px; padding-left: 9px; padding-right: 22px; font-weight: 700;
+}
+QComboBox#HeaderLanguageCombo:hover { background-color: #2B2D40; border-color: #555872; }
+QComboBox#HeaderLanguageCombo::drop-down { width: 20px; }
+QToolButton#ThemeToggle {
+    background-color: #202231; color: #E2E8F0; border: 1px solid #393B50;
+    border-radius: 8px; padding: 0; font-family: "Segoe UI Symbol", "Segoe UI", sans-serif; font-size: 18px; font-weight: 700;
+}
+QToolButton#ThemeToggle:hover { background-color: #2B2D40; border-color: #8B6BE5; color: #FFFFFF; }
+QToolButton#ThemeToggle:pressed { background-color: #242536; }
 QPushButton#PrimaryButton { min-height: 42px; background-color: #6B46C1; color: #FFFFFF; border: 1px solid #805CD4; font-size: 13px; font-weight: 700; }
 QPushButton#PrimaryButton:hover { background-color: #7953D1; border-color: #9677E0; }
 QPushButton#PrimaryButton:pressed { background-color: #5D3AAE; }
@@ -138,6 +150,10 @@ QPushButton:pressed { background-color: #D6DAE4; }
 QPushButton:disabled { background-color: #EEF0F4; color: #A2A8B5; border-color: #DDE1E8; }
 QPushButton#HeaderButton { background-color: #F1F2F6; }
 QPushButton#HeaderButton:hover { background-color: #E6E8EF; border-color: #B7BECC; }
+QComboBox#HeaderLanguageCombo { background-color: #F1F2F6; color: #272B37; border-color: #CDD2DD; }
+QComboBox#HeaderLanguageCombo:hover { background-color: #E6E8EF; border-color: #B7BECC; }
+QToolButton#ThemeToggle { background-color: #F1F2F6; color: #4B5568; border-color: #CDD2DD; }
+QToolButton#ThemeToggle:hover { background-color: #E6E8EF; border-color: #7655D0; color: #4D2C9B; }
 QPushButton#SegmentButton { background-color: #F2F3F7; border-color: #CDD2DD; }
 QPushButton#SegmentButton:checked { background-color: #EEE9FB; border-color: #7655D0; color: #4D2C9B; }
 QToolButton#HelpMarker { color: #6B46C1; background: #F0ECFB; border-color: #C8B9EE; }
