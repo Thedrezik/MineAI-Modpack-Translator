@@ -131,6 +131,8 @@ class TranslationJob:
         self.on_log("-" * 75, "dim")
         if not self.state.should_run():
             self.on_log("🛑 АНАЛИЗ ПРЕРВАН", "red")
+            self.on_status("Остановлено", self.state.line_progress())
+            return
         elif total_en > 0:
             pct = int(total_tr / total_en * 100)
             color = "green" if pct >= 90 else ("yellow" if pct >= 50 else "red")
@@ -355,7 +357,7 @@ class TranslationJob:
             self.on_status("Ошибка перевода", 1.0)
         elif not self.state.should_run():
             self.on_log("\n🛑 ОСТАНОВЛЕНО.", "red")
-            self.on_status("Остановлено", 1.0)
+            self.on_status("Остановлено", self.state.line_progress())
         elif failed_files:
             self.on_log(
                 f"\n⚠️ ЗАВЕРШЕНО С ОШИБКАМИ: пропущено файлов — {failed_files}.",

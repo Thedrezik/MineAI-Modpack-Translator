@@ -33,7 +33,7 @@ def install_graceful_close(app) -> None:
             app.job_state.stop()
 
         try:
-            app.set_status("🛑 Завершение работы...", 1.0)
+            app.set_status("🛑 Завершение работы...", None)
         except Exception:
             pass
         finish_close_when_idle()

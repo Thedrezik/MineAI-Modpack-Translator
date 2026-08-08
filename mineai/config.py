@@ -1,7 +1,5 @@
 import configparser
 import io
-import os
-
 from mineai.constants import SETTINGS_FILE
 from mineai.io_utils import atomic_write_text
 
@@ -11,7 +9,7 @@ class ConfigManager:
 
     _DEFAULTS = {
         "GENERAL": {
-            "mc_dir": os.getcwd(),
+            "mc_dir": "",
             "theme": "Dark",
             "color": "blue",
             "smart_glue": "True",
@@ -65,6 +63,14 @@ class ConfigManager:
 
     def set(self, section: str, key: str, value) -> None:
         self._config.set(section, key, str(value))
+        self.save()
+
+    def set_many(self, section: str, values: dict[str, object]) -> None:
+        """Persist related values with one atomic settings write."""
+        if not self._config.has_section(section):
+            self._config.add_section(section)
+        for key, value in values.items():
+            self._config.set(section, key, str(value))
         self.save()
 
     def getboolean(self, section: str, key: str) -> bool:

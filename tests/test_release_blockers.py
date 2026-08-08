@@ -183,7 +183,7 @@ class GracefulCloseTests(unittest.TestCase):
         active_job.stop.assert_called_once_with()
         app.job_state.stop.assert_not_called()
         app.destroy.assert_not_called()
-        app.set_status.assert_called_once_with("🛑 Завершение работы...", 1.0)
+        app.set_status.assert_called_once_with("🛑 Завершение работы...", None)
 
         app.after.assert_called_once()
         delay, poll = app.after.call_args.args

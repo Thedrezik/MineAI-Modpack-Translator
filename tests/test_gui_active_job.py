@@ -78,6 +78,13 @@ class TranslatorAppJobLifecycleTests(unittest.TestCase):
         state.finish = mock.Mock(side_effect=finish)
         state.stop = mock.Mock(side_effect=finish)
         state.toggle_pause = mock.Mock(side_effect=toggle_pause)
+        state.snapshot = mock.Mock(
+            return_value=SimpleNamespace(
+                total_strings=0, translated_strings=0, ok_strings=0, failed_strings=0
+            )
+        )
+        state.eta_text = mock.Mock(return_value="расчёт...")
+        state.line_progress = mock.Mock(return_value=0.25)
         app.job_state = state
         app._ui_thread_id = threading.get_ident()
         app._ui_queue = queue.Queue()
@@ -89,8 +96,16 @@ class TranslatorAppJobLifecycleTests(unittest.TestCase):
         app.btn_start = mock.Mock()
         app.btn_pause = mock.Mock()
         app.btn_stop = mock.Mock()
+        app.btn_migrate = mock.Mock()
+        app.btn_engine_settings = mock.Mock()
         app.log = mock.Mock()
         app.set_status = mock.Mock()
+        app._validate_minecraft_dir = mock.Mock(return_value=True)
+        app._validate_scope = mock.Mock(return_value=True)
+        app._validate_engine_ready = mock.Mock(return_value=True)
+        app._confirm_inplace = mock.Mock(return_value=True)
+        app._reset_run_ui = mock.Mock()
+        app._refresh_engine_readiness = mock.Mock()
         return app
 
     def test_stop_targets_the_retained_translation_job(self) -> None:
@@ -183,6 +198,7 @@ class TranslatorAppJobLifecycleTests(unittest.TestCase):
         app.job_state.stop.assert_called_once_with()
         app.btn_stop.configure.assert_called_once_with(state="disabled")
         app.btn_pause.configure.assert_called_once_with(state="disabled")
+        app.set_status.assert_called_once_with("🛑 Остановка...", None)
 
     def test_worker_ui_update_is_queued_without_calling_tk(self) -> None:
         app = object.__new__(gui_app.TranslatorApp)
@@ -229,6 +245,44 @@ class TranslatorAppJobLifecycleTests(unittest.TestCase):
             [mock.call(state="disabled"), mock.call(state="normal")],
         )
 
+    def test_lock_ui_also_locks_migration_button(self) -> None:
+        app = self._bare_app()
+        app._lock_ui = gui_app.TranslatorApp._lock_ui.__get__(
+            app, gui_app.TranslatorApp
+        )
+
+        app._lock_ui(True)
+        app._lock_ui(False)
+
+        self.assertEqual(
+            app.btn_migrate.configure.call_args_list,
+            [mock.call(state="disabled"), mock.call(state="normal")],
+        )
+
+    def test_failed_preflight_does_not_start_translation_worker(self) -> None:
+        app = self._bare_app()
+        app._validate_minecraft_dir.return_value = False
+        app.var_engine = SimpleNamespace(get=lambda: "google")
+
+        with mock.patch.object(gui_app.threading, "Thread") as thread:
+            app._start_translation()
+
+        thread.assert_not_called()
+        app._lock_ui.assert_not_called()
+        app.job_state.start.assert_not_called()
+
+    def test_inplace_cancel_does_not_start_translation_worker(self) -> None:
+        app = self._bare_app()
+        app._confirm_inplace.return_value = False
+        app.var_engine = SimpleNamespace(get=lambda: "google")
+
+        with mock.patch.object(gui_app.threading, "Thread") as thread:
+            app._start_translation()
+
+        thread.assert_not_called()
+        app._lock_ui.assert_not_called()
+        app.job_state.start.assert_not_called()
+
     def test_open_log_file_uses_cross_platform_opener(self) -> None:
         app = self._bare_app()
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -262,6 +316,8 @@ class TranslatorAppJobLifecycleTests(unittest.TestCase):
         window.cache_std = mock.Mock()
         window.after = mock.Mock()
         window.destroy = mock.Mock()
+        window.result_frame = mock.Mock()
+        window._show_result = mock.Mock()
         created_threads = []
 
         def make_thread(*, target, daemon):
@@ -290,7 +346,12 @@ class TranslatorAppJobLifecycleTests(unittest.TestCase):
         window.destroy.assert_not_called()
 
         poll_finished()
-        window.destroy.assert_called_once_with()
+        window._show_result.assert_called_once_with(
+            count=0,
+            error=None,
+            cache_type="ai",
+        )
+        window.destroy.assert_not_called()
         self.assertEqual(window.after.call_count, 1)
 
 
