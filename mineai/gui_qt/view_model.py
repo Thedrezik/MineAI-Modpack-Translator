@@ -10,11 +10,14 @@ from dataclasses import dataclass
 import time
 from pathlib import Path
 
+from mineai.gui_qt.i18n_runtime import tr
+
 
 ENGINE_OPTIONS = {
     "Google": ("google", "local"),
     "DeepL": ("deepl", "local"),
     "Локальный ИИ": ("ai", "local"),
+    "Local AI": ("ai", "local"),
     "OpenRouter": ("ai", "openrouter"),
 }
 
@@ -79,25 +82,25 @@ def stats_from_snapshot(snapshot, *, now: float | None = None, eta_text: str = "
 def engine_readiness(config, engine_label: str) -> tuple[bool, str]:
     engine, provider = ENGINE_OPTIONS.get(engine_label, ("", ""))
     if engine == "google":
-        return True, "Google готов"
+        return True, tr("ready.google")
     if engine == "deepl":
         return (
-            (True, "DeepL API настроен")
+            (True, tr("ready.deepl"))
             if config.get("API", "deepl_key").strip()
-            else (False, "Не указан API-ключ DeepL")
+            else (False, tr("ready.deepl_missing"))
         )
     if engine == "ai" and provider == "openrouter":
         if not config.get("OPENROUTER", "api_key").strip():
-            return False, "Не указан ключ OpenRouter"
+            return False, tr("ready.openrouter_key")
         model = config.get("OPENROUTER", "model").strip()
         if not model:
-            return False, "Не выбрана модель OpenRouter"
+            return False, tr("ready.openrouter_model")
         return True, f"OpenRouter · {model}"
     if engine == "ai":
         model_path = config.get("AI", "model_path").strip()
         if not model_path:
-            return False, "Не выбрана локальная GGUF-модель"
+            return False, tr("ready.local_model")
         if not Path(model_path).is_file():
-            return False, "Файл GGUF-модели недоступен"
+            return False, tr("ready.local_unavailable")
         return True, f"KoboldCPP · {Path(model_path).name}"
-    return False, "Неизвестный движок"
+    return False, tr("ready.unknown")

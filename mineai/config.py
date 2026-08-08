@@ -11,6 +11,7 @@ class ConfigManager:
         "GENERAL": {
             "mc_dir": "",
             "theme": "Dark",
+            "ui_language": "ru",
             "color": "blue",
             "smart_glue": "True",
             "google_workers": "5",

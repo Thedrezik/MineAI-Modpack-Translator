@@ -1,0 +1,74 @@
+import unittest
+
+from mineai.config import ConfigManager
+from mineai.gui_qt.i18n import translator, t
+from mineai.gui_qt.i18n_runtime import tr
+from mineai.gui_qt.log_model import entry_from_message, matches_entry
+from mineai.gui_qt.theme import theme_qss
+from mineai.gui_qt.view_model import engine_readiness
+
+
+class _ConfigStub:
+    def __init__(self, values=None):
+        self.values = values or {}
+
+    def get(self, section, key):
+        return self.values.get((section, key), "")
+
+
+class QtUxHardeningTests(unittest.TestCase):
+    def setUp(self):
+        self.previous_language = translator.language
+        translator.set_language("ru")
+
+    def tearDown(self):
+        translator.set_language(self.previous_language)
+
+    def test_config_has_persisted_ui_language_default(self):
+        self.assertEqual(ConfigManager._DEFAULTS["GENERAL"]["ui_language"], "ru")
+        self.assertEqual(ConfigManager._DEFAULTS["GENERAL"]["theme"], "Dark")
+
+    def test_interface_dictionary_switches_between_ru_and_en(self):
+        self.assertEqual(t("button.analysis"), "Анализ")
+        translator.set_language("en")
+        self.assertEqual(t("button.analysis"), "Analyze")
+        self.assertEqual(tr("engine.local"), "Local AI")
+
+    def test_engine_readiness_uses_current_interface_language(self):
+        config = _ConfigStub()
+        self.assertEqual(engine_readiness(config, "Google"), (True, "Google готов"))
+        translator.set_language("en")
+        self.assertEqual(engine_readiness(config, "Google"), (True, "Google ready"))
+        self.assertEqual(engine_readiness(config, "Local AI"), (False, "Local GGUF model is not selected"))
+
+    def test_theme_qss_has_live_dark_and_light_palettes(self):
+        dark = theme_qss("Dark")
+        light = theme_qss("Light")
+        self.assertIn("#12131C", dark)
+        self.assertIn("#F5F6FA", light)
+        self.assertIn("QToolButton#HelpMarker", dark)
+        self.assertIn("QPlainTextEdit#LogView", light)
+
+    def test_semantic_filters_do_not_treat_all_yellow_lines_as_errors(self):
+        progress = entry_from_message("yellow", "📦 Чтение ресурс-пака pack.zip...", "#fff")
+        error = entry_from_message("red", "Ошибка: connection timeout", "#fff")
+        skipped = entry_from_message("yellow", "Пропущено: уже переведено", "#fff")
+        translated = entry_from_message("green", " > Apple -> Яблоко", "#fff")
+        analysis = entry_from_message("cyan", "Анализ сборки: найдено 14 модов", "#fff")
+
+        self.assertEqual(progress.category, "other")
+        self.assertEqual(error.category, "issues")
+        self.assertEqual(skipped.category, "issues")
+        self.assertEqual(translated.category, "translated")
+        self.assertEqual(analysis.category, "analysis")
+
+    def test_semantic_filter_combines_category_and_casefolded_search(self):
+        entry = entry_from_message("green", " > Quantic Math -> Квантовая Математика", "#fff")
+        self.assertTrue(matches_entry(entry, "translated", "quantic"))
+        self.assertTrue(matches_entry(entry, "all", "МАТЕМАТИКА"))
+        self.assertFalse(matches_entry(entry, "issues", "quantic"))
+        self.assertFalse(matches_entry(entry, "translated", "apotheosis"))
+
+
+if __name__ == "__main__":
+    unittest.main()

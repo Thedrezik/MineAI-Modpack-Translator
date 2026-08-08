@@ -4,7 +4,21 @@ from __future__ import annotations
 
 from PyQt6.QtCore import QRectF, Qt
 from PyQt6.QtGui import QColor, QPainter
-from PyQt6.QtWidgets import QFrame, QHBoxLayout, QLabel, QProgressBar, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QFrame, QHBoxLayout, QLabel, QProgressBar, QToolButton, QVBoxLayout, QWidget
+
+
+class HelpMarker(QToolButton):
+    """Compact native tooltip affordance for settings that need explanation."""
+
+    def __init__(self, tooltip: str, parent=None) -> None:
+        super().__init__(parent)
+        self.setObjectName("HelpMarker")
+        self.setText("?")
+        self.setToolTip(tooltip)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setAutoRaise(True)
+        self.setFixedSize(20, 20)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
 
 
 class Card(QFrame):
@@ -15,15 +29,16 @@ class Card(QFrame):
         self.layout_root.setContentsMargins(12, 10, 12, 12)
         self.layout_root.setSpacing(6)
 
-        title_label = QLabel(title.upper())
-        title_label.setObjectName("SectionTitle")
-        self.layout_root.addWidget(title_label)
+        self.title_label = QLabel(title.upper())
+        self.title_label.setObjectName("SectionTitle")
+        self.layout_root.addWidget(self.title_label)
 
+        self.subtitle_label: QLabel | None = None
         if subtitle:
-            subtitle_label = QLabel(subtitle)
-            subtitle_label.setObjectName("SectionSubtitle")
-            subtitle_label.setWordWrap(True)
-            self.layout_root.addWidget(subtitle_label)
+            self.subtitle_label = QLabel(subtitle)
+            self.subtitle_label.setObjectName("SectionSubtitle")
+            self.subtitle_label.setWordWrap(True)
+            self.layout_root.addWidget(self.subtitle_label)
 
         self.body = QVBoxLayout()
         self.body.setContentsMargins(0, 0, 0, 0)
@@ -43,10 +58,10 @@ class StatCard(QFrame):
         header.setContentsMargins(0, 0, 0, 0)
         self.icon = QLabel("●")
         self.icon.setStyleSheet("background: transparent; border: none; color: #94A3B8; font-size: 14px;")
-        caption = QLabel(title.upper())
-        caption.setObjectName("KpiCaption")
+        self.caption = QLabel(title.upper())
+        self.caption.setObjectName("KpiCaption")
         header.addWidget(self.icon)
-        header.addWidget(caption)
+        header.addWidget(self.caption)
         header.addStretch(1)
         layout.addLayout(header)
 
@@ -72,7 +87,7 @@ class StatusPill(QFrame):
         self.setObjectName("GlobalWarning")
         layout = QHBoxLayout(self)
         layout.setContentsMargins(11, 6, 11, 6)
-        self.label = QLabel("Проверка готовности")
+        self.label = QLabel("…")
         self.label.setObjectName("WarningText")
         layout.addWidget(self.label)
 
@@ -95,12 +110,12 @@ class LabeledValue(QFrame):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(5)
-        key = QLabel(label)
-        key.setObjectName("MutedLabel")
+        self.key = QLabel(label)
+        self.key.setObjectName("MutedLabel")
         self.value = QLabel("—")
         self.value.setObjectName("StrongLabel")
         self.value.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        layout.addWidget(key)
+        layout.addWidget(self.key)
         layout.addWidget(self.value)
 
 
@@ -111,6 +126,7 @@ class SegmentedProgressBar(QWidget):
         super().__init__(parent)
         self._segments = max(8, segments)
         self._value = 0.0
+        self._theme = "Dark"
         self.setMinimumHeight(18)
         self.setMaximumHeight(18)
 
@@ -121,6 +137,10 @@ class SegmentedProgressBar(QWidget):
     def value(self) -> float:
         return self._value
 
+    def set_theme(self, theme: str) -> None:
+        self._theme = "Light" if str(theme).casefold() == "light" else "Dark"
+        self.update()
+
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
@@ -129,10 +149,11 @@ class SegmentedProgressBar(QWidget):
         gap = 3.0
         segment_width = max(1.0, (width - gap * (self._segments - 1)) / self._segments)
         filled = self._value * self._segments
+        active = QColor("#6B46C1")
+        inactive = QColor("#D9DDE7") if self._theme == "Light" else QColor("#26283A")
         for index in range(self._segments):
             x = index * (segment_width + gap)
             rect = QRectF(x, 2.0, segment_width, max(2.0, height - 4.0))
-            color = QColor("#7C5CE0") if index < filled else QColor("#26283A")
             painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(color)
+            painter.setBrush(active if index < filled else inactive)
             painter.drawRoundedRect(rect, 2.5, 2.5)
