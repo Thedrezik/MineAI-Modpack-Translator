@@ -49,7 +49,7 @@ from mineai.gui_qt.i18n_runtime import tr as rt
 from mineai.gui_qt.log_model import LogEntry, LogSegment, entry_from_message, matches_entry
 from mineai.gui_qt.theme import theme_qss
 from mineai.gui_qt.view_model import ENGINE_OPTIONS, engine_readiness, format_duration, stats_from_snapshot
-from mineai.gui_qt.widgets import Card, HelpMarker, LabeledValue, SegmentedProgressBar, StatCard, StatusPill
+from mineai.gui_qt.widgets import Card, ElidedLabel, HelpMarker, LabeledValue, SegmentedProgressBar, StatCard, StatusPill
 
 
 def _resolve_icon_path() -> str | None:
@@ -96,7 +96,7 @@ class TranslatorQtWindow(QMainWindow):
         if icon_path:
             self.setWindowIcon(QIcon(icon_path))
         self.resize(1520, 940)
-        self.setMinimumSize(1180, 760)
+        self.setMinimumSize(1240, 760)
         self.setAcceptDrops(True)
         self.setStyleSheet(theme_qss(self._theme_name))
 
@@ -236,7 +236,7 @@ class TranslatorQtWindow(QMainWindow):
     def _build_sidebar(self) -> QWidget:
         host = QWidget()
         host.setObjectName("SidebarHost")
-        host.setFixedWidth(390)
+        host.setFixedWidth(430)
         host_layout = QVBoxLayout(host)
         host_layout.setContentsMargins(0, 0, 0, 0)
         host_layout.setSpacing(10)
@@ -320,7 +320,7 @@ class TranslatorQtWindow(QMainWindow):
         ready.setObjectName("ReadyBox")
         ready_layout = QHBoxLayout(ready)
         ready_layout.setContentsMargins(9, 6, 7, 6)
-        self.engine_ready_label = QLabel(t("engine.checking"))
+        self.engine_ready_label = ElidedLabel(t("engine.checking"))
         self.engine_ready_label.setObjectName("ReadyText")
         configure = QPushButton(t("button.configure"))
         configure.setFixedWidth(92)
@@ -350,8 +350,8 @@ class TranslatorQtWindow(QMainWindow):
         self.ai_mode_combo.addItem(t("ai.context"), "context")
         ai_grid.addWidget(self.ai_mode_combo, 0, 2)
 
-        batch_label = QLabel(t("field.ai_batch"))
-        ai_grid.addWidget(batch_label, 1, 0)
+        self.ai_batch_label = QLabel(t("field.ai_batch_limit"))
+        ai_grid.addWidget(self.ai_batch_label, 1, 0)
         ai_grid.addWidget(HelpMarker(t("tooltip.ai_batch")), 1, 1)
         self.ai_batch_spin = QSpinBox()
         self.ai_batch_spin.setRange(1, 40)
@@ -393,10 +393,11 @@ class TranslatorQtWindow(QMainWindow):
         self.mode_group = QButtonGroup(card)
         self.mode_group.setExclusive(True)
         self.mode_buttons: dict[str, QPushButton] = {}
-        for value, label in (("append", "Append"), ("skip", "Skip"), ("force", "Force")):
-            button = QPushButton(label)
+        for value in ("append", "skip", "force"):
+            button = QPushButton(t(f"mode.{value}"))
             button.setObjectName("SegmentButton")
             button.setCheckable(True)
+            button.setToolTip(t(f"tooltip.mode_{value}"))
             if value == "append":
                 button.setChecked(True)
             self.mode_group.addButton(button)
@@ -413,6 +414,8 @@ class TranslatorQtWindow(QMainWindow):
         self.output_group.setExclusive(True)
         self.output_rp = QPushButton(t("output.resourcepack"))
         self.output_inplace = QPushButton(t("output.inplace"))
+        self.output_rp.setToolTip(t("tooltip.output_resourcepack"))
+        self.output_inplace.setToolTip(t("tooltip.output_inplace"))
         for button in (self.output_rp, self.output_inplace):
             button.setObjectName("SegmentButton")
             button.setCheckable(True)

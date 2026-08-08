@@ -34,6 +34,22 @@ class QtUxHardeningTests(unittest.TestCase):
         self.assertEqual(t("button.analysis"), "Analyze")
         self.assertEqual(tr("engine.local"), "Local AI")
 
+    def test_mode_labels_and_batch_guidance_are_localized(self):
+        self.assertEqual(t("mode.append"), "Дополнить")
+        self.assertEqual(t("mode.skip"), "Пропустить")
+        self.assertEqual(t("mode.force"), "Заново")
+        self.assertEqual(t("output.resourcepack"), "Ресурс-пак")
+        self.assertEqual(t("output.inplace"), "Прямо в JAR")
+        self.assertIn("макс. 40", t("field.ai_batch_limit"))
+        self.assertIn("15 строк или меньше", t("tooltip.ai_batch"))
+        self.assertIn("90%", t("tooltip.mode_skip"))
+
+        translator.set_language("en")
+        self.assertEqual(t("mode.append"), "Append")
+        self.assertEqual(t("output.resourcepack"), "Resource Pack")
+        self.assertIn("max. 40", t("field.ai_batch_limit"))
+        self.assertIn("15 lines or fewer", t("tooltip.ai_batch"))
+
     def test_engine_readiness_uses_current_interface_language(self):
         config = _ConfigStub()
         self.assertEqual(engine_readiness(config, "Google"), (True, "Google готов"))

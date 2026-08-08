@@ -4,7 +4,42 @@ from __future__ import annotations
 
 from PyQt6.QtCore import QRectF, Qt
 from PyQt6.QtGui import QColor, QPainter
-from PyQt6.QtWidgets import QFrame, QHBoxLayout, QLabel, QProgressBar, QToolButton, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QFrame, QHBoxLayout, QLabel, QProgressBar, QSizePolicy, QToolButton, QToolTip, QVBoxLayout, QWidget
+
+
+class ElidedLabel(QLabel):
+    """Single-line label that never forces its container wider than available space."""
+
+    def __init__(self, text: str = "", parent=None) -> None:
+        super().__init__(parent)
+        self._full_text = ""
+        self.setMinimumWidth(0)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.setText(text)
+
+    def setText(self, text: str) -> None:
+        self._full_text = str(text)
+        self._refresh_elision()
+
+    def fullText(self) -> str:
+        return self._full_text
+
+    def _refresh_elision(self) -> None:
+        width = self.contentsRect().width()
+        if width <= 1:
+            visible = self._full_text
+        else:
+            visible = self.fontMetrics().elidedText(
+                self._full_text,
+                Qt.TextElideMode.ElideRight,
+                width,
+            )
+        super().setText(visible)
+        self.setToolTip(self._full_text)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._refresh_elision()
 
 
 class HelpMarker(QToolButton):
@@ -19,6 +54,23 @@ class HelpMarker(QToolButton):
         self.setAutoRaise(True)
         self.setFixedSize(20, 20)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+
+    def _show_help(self) -> None:
+        text = self.toolTip()
+        if text:
+            QToolTip.showText(self.mapToGlobal(self.rect().bottomLeft()), text, self)
+
+    def enterEvent(self, event) -> None:
+        self._show_help()
+        super().enterEvent(event)
+
+    def mousePressEvent(self, event) -> None:
+        self._show_help()
+        super().mousePressEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        QToolTip.hideText()
+        super().leaveEvent(event)
 
 
 class Card(QFrame):
