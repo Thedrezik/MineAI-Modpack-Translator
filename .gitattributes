@@ -1,0 +1,3 @@
+# Keep Windows batch scripts byte-stable in GitHub source archives.
+# Batch files are stored with CRLF in the repository; do not normalize them.
+*.bat -text
