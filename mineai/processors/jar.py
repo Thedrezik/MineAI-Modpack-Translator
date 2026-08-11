@@ -3,7 +3,7 @@ import os
 import re
 import zipfile
 
-from mineai.constants import BOOK_PATH_MARKERS, MD_PATH_MARKERS, RESEARCH_PATH_MARKERS
+from mineai.constants import BOOK_PATH_MARKERS, RESEARCH_PATH_MARKERS
 from mineai.engines.base import EngineCallbacks
 from mineai.engines.service import TranslationService
 from mineai.json_utils import (
@@ -17,6 +17,11 @@ from mineai.output.pack_writer import PackWriter
 from mineai.processors.locale_keys import (
     collect_lang_keys_to_translate,
     count_translatable_lang_entries,
+)
+from mineai.processors.markdown_guides import (
+    get_markdown_target_path,
+    is_source_markdown_guide,
+    is_target_markdown_locale_path,
 )
 from mineai.processors.selection import (
     build_book_json_output,
@@ -75,6 +80,10 @@ class JarProcessor:
                     for item in zin.infolist()
                     if target_file in item.filename.lower()
                     or f"/{target_lang['file']}/" in item.filename.lower()
+                    or is_target_markdown_locale_path(
+                        item.filename,
+                        target_lang["file"],
+                    )
                 }
 
                 try:
@@ -90,6 +99,10 @@ class JarProcessor:
                             if (
                                 target_file not in fl
                                 and f"/{target_lang['file']}/" not in fl
+                                and not is_target_markdown_locale_path(
+                                    item.filename,
+                                    target_lang["file"],
+                                )
                             ):
                                 zout.writestr(item, zin.read(item))
 
@@ -101,11 +114,7 @@ class JarProcessor:
                                 or any(m in fl for m in RESEARCH_PATH_MARKERS)
                             )
                         )
-                        is_book_md = (
-                            (fl.endswith(".md") or fl.endswith(".txt"))
-                            and "/en_us/" in fl
-                            and any(m in fl for m in MD_PATH_MARKERS)
-                        )
+                        is_book_md = is_source_markdown_guide(item.filename)
                         is_lang = fl.endswith("en_us.json") and not is_book_json
 
                         if translate_mods and is_lang:
@@ -155,6 +164,10 @@ class JarProcessor:
                             is_target = (
                                 target_file in fl
                                 or f"/{target_lang['file']}/" in fl
+                                or is_target_markdown_locale_path(
+                                    item.filename,
+                                    target_lang["file"],
+                                )
                             )
                             if is_target and item.filename not in written_inplace:
                                 zout.writestr(item, zin.read(item))
@@ -363,16 +376,9 @@ class JarProcessor:
         self, zin, zout, item, locale_files, target_lang, mode,
         output_mode, pack_writer, mod_name, written_inplace,
     ) -> bool:
-        fl = item.filename.lower()
-        tr_path = (
-            re.sub(
-                r"/en_us/",
-                f"/{target_lang['file']}/",
-                item.filename,
-                flags=re.IGNORECASE,
-            )
-            if "/en_us/" in fl
-            else item.filename
+        tr_path = get_markdown_target_path(
+            item.filename,
+            target_lang["file"],
         )
         tr_key = tr_path.lower()
         try:
@@ -459,4 +465,3 @@ class JarProcessor:
             written_inplace.add(tr_path)
             return True
         return False
-

@@ -9,16 +9,23 @@ from mineai.json_utils import (
     path_to_key,
 )
 from mineai.text_processing import (
-    apply_smart_glue,
+    PLACEHOLDER_PATTERN,
     is_technical_term,
     looks_like_source_language,
+    mask_protected_fragments,
 )
 
 
 YAML_TITLE_RE = re.compile(
-    r'^(\s*title\s*:\s*[\'"]?)(.*?)([\'"]?)$',
+    r'^(\s*title\s*:\s*[\'\"]?)(.*?)([\'\"]?)$',
     re.IGNORECASE,
 )
+_MARKDOWN_BLOCK_MARKER_RE = re.compile(
+    r"^(?:#{1,6}[ \t]+|[-+*][ \t]+|\d+[.)][ \t]+|>[ \t]*)"
+)
+_MARKDOWN_LIST_MARKER_RE = re.compile(r"^(?:[-+*]|\d+[.)])[ \t]+$")
+_MARKDOWN_TASK_MARKER_RE = re.compile(r"^\[[ xX]\][ \t]+")
+_FENCED_CODE_RE = re.compile(r"^[ \t]{0,3}(?P<fence>`{3,}|~{3,})")
 
 
 def skip_threshold_reached(total_translatable: int, pending_count: int) -> bool:
@@ -93,6 +100,9 @@ class MarkdownSelection:
     source_text: str
     lines_out: list[str]
     pending: dict[str, str]
+    # Exact structural affixes reconstructed by JarProcessor after translation.
+    # The historical field name is kept so the writer does not need a parallel
+    # Markdown-only translation path.
     title_meta: dict[str, tuple[str, str]]
     total_translatable: int
 
@@ -104,6 +114,72 @@ def _extract_yaml_title(line: str) -> tuple[str, str, str] | None:
     return match.group(1), match.group(2), match.group(3)
 
 
+def split_markdown_block_structure(line: str) -> tuple[str, str, str]:
+    """Return exact ``(prefix, payload, suffix)`` for a Markdown prose line.
+
+    Block-level syntax is kept out of TranslationService. This is deliberately
+    lightweight rather than an AST: preserve leading indentation, consume
+    heading/list/quote/task markers, and preserve trailing whitespace/hard-break
+    syntax. The remaining payload can safely use the shared inline masker.
+    """
+    leading = re.match(r"^[ \t]*", line)
+    prefix = leading.group(0) if leading else ""
+    payload = line[len(prefix) :]
+
+    for _ in range(8):
+        marker_match = _MARKDOWN_BLOCK_MARKER_RE.match(payload)
+        if not marker_match:
+            break
+        marker = marker_match.group(0)
+        prefix += marker
+        payload = payload[len(marker) :]
+
+        if _MARKDOWN_LIST_MARKER_RE.fullmatch(marker):
+            task_match = _MARKDOWN_TASK_MARKER_RE.match(payload)
+            if task_match:
+                task_marker = task_match.group(0)
+                prefix += task_marker
+                payload = payload[len(task_marker) :]
+
+    suffix = ""
+
+    # Closing ATX heading markers are structural as well, e.g. ``## Title ##``.
+    if re.match(r"^[ \t]*#{1,6}[ \t]+", prefix):
+        closing = re.match(r"^(.*?)([ \t]+#+[ \t]*)$", payload)
+        if closing:
+            payload, suffix = closing.group(1), closing.group(2)
+
+    # Preserve trailing spaces/tabs exactly. In Markdown, two trailing spaces are
+    # a hard line break and must never be normalized by the translation service.
+    if not suffix:
+        trailing = re.match(r"^(.*?)([ \t]+)$", payload)
+        if trailing:
+            payload, suffix = trailing.group(1), trailing.group(2)
+
+    return prefix, payload, suffix
+
+
+def _markdown_payload_has_translatable_prose(payload: str) -> bool:
+    if not payload.strip():
+        return False
+
+    # At this point block-level Markdown structure has already been removed.
+    # Titanium Shield therefore only needs to hide inline technical fragments.
+    masked, _mapping = mask_protected_fragments(payload)
+    residual = PLACEHOLDER_PATTERN.sub("", masked).strip()
+    return bool(
+        residual
+        and looks_like_source_language(residual)
+        and not is_technical_term(residual)
+    )
+
+
+def markdown_line_has_translatable_prose(line: str) -> bool:
+    """Return True when a Markdown line contains human-readable source prose."""
+    _prefix, payload, _suffix = split_markdown_block_structure(line)
+    return _markdown_payload_has_translatable_prose(payload)
+
+
 def collect_book_markdown_selection(
     source_text: str,
     target_text: str,
@@ -112,26 +188,37 @@ def collect_book_markdown_selection(
     smart_glue: bool,
 ) -> MarkdownSelection:
     """Build one shared Markdown/YAML translation plan for estimator and writer."""
-    if smart_glue:
-        source_text = apply_smart_glue(source_text)
-
+    # Do not apply smart glue to the complete Markdown document. TranslationService
+    # applies it to selected payloads, while gluing a whole document can join YAML
+    # fences, images, tables, lists or component lines and change structure.
     source_lines = source_text.split("\n")
     target_lines = target_text.split("\n") if target_text else []
     lines_out = list(source_lines)
     pending: dict[str, str] = {}
-    title_meta: dict[str, tuple[str, str]] = {}
+    structural_meta: dict[str, tuple[str, str]] = {}
     total_translatable = 0
-    in_yaml = False
+
+    # YAML front matter is structural only when it starts the document. A later
+    # ``---`` is a horizontal rule and must not accidentally reopen YAML mode.
+    has_frontmatter = bool(
+        source_lines
+        and source_lines[0].lstrip("\ufeff").strip() == "---"
+    )
+    in_yaml = has_frontmatter
+    in_fenced_code = False
+    fence_char = ""
+    fence_len = 0
 
     for index, line in enumerate(source_lines):
         stripped = line.strip()
-        if stripped == "---":
-            in_yaml = not in_yaml
+
+        if has_frontmatter and index == 0 and stripped == "---":
             continue
 
-        existing_line = target_lines[index] if index < len(target_lines) else ""
-
         if in_yaml:
+            if stripped == "---":
+                in_yaml = False
+                continue
             if not stripped.lower().startswith("title:"):
                 continue
             source_title = _extract_yaml_title(line)
@@ -146,7 +233,8 @@ def collect_book_markdown_selection(
                 continue
 
             total_translatable += 1
-            title_meta[str(index)] = (prefix, suffix)
+            structural_meta[str(index)] = (prefix, suffix)
+            existing_line = target_lines[index] if index < len(target_lines) else ""
             existing_title_parts = _extract_yaml_title(existing_line)
             existing_title = (
                 existing_title_parts[1] if existing_title_parts else ""
@@ -157,18 +245,31 @@ def collect_book_markdown_selection(
                 lines_out[index] = existing_line
             continue
 
-        if stripped.startswith("<") or stripped.startswith("!["):
+        fence_match = _FENCED_CODE_RE.match(line)
+        if fence_match:
+            fence = fence_match.group("fence")
+            if not in_fenced_code:
+                in_fenced_code = True
+                fence_char = fence[0]
+                fence_len = len(fence)
+            elif fence[0] == fence_char and len(fence) >= fence_len:
+                in_fenced_code = False
+                fence_char = ""
+                fence_len = 0
             continue
-        if (
-            not stripped
-            or not looks_like_source_language(line)
-            or is_technical_term(line)
-        ):
+        if in_fenced_code:
+            continue
+
+        block_prefix, payload, block_suffix = split_markdown_block_structure(line)
+        if not _markdown_payload_has_translatable_prose(payload):
             continue
 
         total_translatable += 1
+        existing_line = target_lines[index] if index < len(target_lines) else ""
         if _needs_translation(line, existing_line, mode):
-            pending[str(index)] = line
+            pending[str(index)] = payload
+            if block_prefix or block_suffix:
+                structural_meta[str(index)] = (block_prefix, block_suffix)
         else:
             lines_out[index] = existing_line
 
@@ -176,7 +277,7 @@ def collect_book_markdown_selection(
         source_text=source_text,
         lines_out=lines_out,
         pending=pending,
-        title_meta=title_meta,
+        title_meta=structural_meta,
         total_translatable=total_translatable,
     )
 

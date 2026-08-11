@@ -19,14 +19,17 @@ FORMAT_PATTERN = re.compile(
     r"[&§][0-9a-fk-orlmn]|"
     r"<[^>]+>|"
     r"\{[^\}]+\}|"
+    r"(?<=\])\([^)]+\)|"
     r"\]\([^)]+\)|"
     r"!\[[^\]]*\]|"
     r"\[[a-z0-9_.-]+:[a-z0-9_./-]+\]|"
+    r"\[(?=[^\]\n]+\]\([^)]+\))|"
     r"\([a-z0-9_.-]+:[a-z0-9_./-]+\)|"
     r"\([A-Za-z0-9_./-]+\.md[#a-zA-Z0-9_-]*\)|"
+    r"\||"
     r"\\[nrt]|"
     r"\n|"
-    r"\\+(?![\"])|"
+    r"\\+(?![\\\"])|"
     r"%[0-9.,]*\$?[a-zA-Z%]"
     r")",
     flags=re.IGNORECASE,
@@ -109,7 +112,12 @@ def polish_translation(text: str) -> str:
 
 
 def mask_protected_fragments(text: str) -> tuple[str, dict[str, str]]:
-    """Replace format codes and protected terms with collision-free placeholders."""
+    """Replace inline format codes and protected terms with placeholders.
+
+    Format-level structure (for example Markdown list/heading prefixes) must be
+    removed by its processor before calling TranslationService. This function
+    intentionally protects only fragments that can occur inside text payloads.
+    """
     mapping: dict[str, str] = {}
     reserved_ids = set(PLACEHOLDER_PATTERN.findall(text))
     next_id = 0
@@ -131,7 +139,11 @@ def mask_protected_fragments(text: str) -> tuple[str, dict[str, str]]:
 def unmask_translation(text: str, mapping: dict[str, str]) -> str:
     for token, original in mapping.items():
         idx = token.strip("#[]")
-        text = re.sub(rf"\[\s*#\s*{re.escape(idx)}\s*#\s*\]", lambda _m, o=original: o, text)
+        text = re.sub(
+            rf"\[\s*#\s*{re.escape(idx)}\s*#\s*\]",
+            lambda _m, o=original: o,
+            text,
+        )
     return text
 
 
