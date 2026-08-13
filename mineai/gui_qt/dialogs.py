@@ -1,4 +1,4 @@
-"""Qt versions of Settings, Prompt Editor and Migration dialogs.
+﻿"""Qt versions of Settings, Prompt Editor and Migration dialogs.
 
 They use the same configuration, prompt and migration APIs as the current beta.
 No translation engine or processor behavior is reimplemented here.
@@ -12,10 +12,12 @@ import traceback
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
+    QAbstractItemView,
     QButtonGroup,
     QCheckBox,
     QComboBox,
     QDialog,
+    QDialogButtonBox,
     QFileDialog,
     QFrame,
     QHBoxLayout,
@@ -29,16 +31,214 @@ from PyQt6.QtWidgets import (
     QSlider,
     QSpinBox,
     QTabWidget,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
 from mineai.constants import DEFAULT_OPENROUTER_MODEL, LANGUAGES
+from mineai.engines.lmstudio import list_lmstudio_models, normalize_lmstudio_base_url
 from mineai.engines.llm_common import get_default_prompts, load_prompts, save_prompts
 from mineai.processors.migration import run_migration
-from mineai.gui_qt.bridge import MigrationSignals
+from mineai.gui_qt.bridge import LmStudioSignals, MigrationSignals
 from mineai.gui_qt.i18n import t
 from mineai.gui_qt.widgets import HelpMarker, ScrollSafeSpinBox
+
+
+class AnalysisSelectionDialog(QDialog):
+    """Dedicated tree editor for analysis targets and quest subgroups."""
+
+    def __init__(self, items, selected_keys, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(t("analysis.dialog_title"))
+        self.resize(980, 680)
+        self.setMinimumSize(760, 520)
+        self._items = {item.key: item for item in items}
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(20, 20, 20, 20)
+        root.setSpacing(12)
+
+        title = QLabel(t("analysis.dialog_title"))
+        title.setObjectName("DialogTitle")
+        root.addWidget(title)
+        subtitle = QLabel(t("analysis.dialog_hint"))
+        subtitle.setObjectName("MutedLabel")
+        subtitle.setWordWrap(True)
+        root.addWidget(subtitle)
+
+        filters = QHBoxLayout()
+        self.search = QLineEdit()
+        self.search.setPlaceholderText(t("analysis.search"))
+        self.type_filter = QComboBox()
+        for label, scope in (
+            (t("analysis.filter_all"), "all"),
+            (t("analysis.filter_mods"), "mods"),
+            (t("analysis.filter_books"), "books"),
+            (t("analysis.filter_quests"), "quests"),
+        ):
+            self.type_filter.addItem(label, scope)
+        select_all = QPushButton(t("analysis.select_all"))
+        select_none = QPushButton(t("analysis.select_none"))
+        filters.addWidget(self.search, 1)
+        filters.addWidget(self.type_filter)
+        filters.addWidget(select_all)
+        filters.addWidget(select_none)
+        root.addLayout(filters)
+
+        self.tree = QTreeWidget()
+        self.tree.setObjectName("TranslationSelectionTree")
+        self.tree.setColumnCount(4)
+        self.tree.setHeaderLabels(
+            (
+                t("analysis.check"),
+                t("analysis.item"),
+                t("analysis.type"),
+                t("analysis.progress"),
+            )
+        )
+        self.tree.setAlternatingRowColors(True)
+        self.tree.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self.tree.setColumnWidth(0, 105)
+        self.tree.setColumnWidth(1, 430)
+        self.tree.setColumnWidth(2, 150)
+        root.addWidget(self.tree, 1)
+
+        rows: dict[str, QTreeWidgetItem] = {}
+        ordered_items = list(items)
+        for item in ordered_items:
+            if item.parent_key is not None:
+                continue
+            row = QTreeWidgetItem(self.tree)
+            rows[item.key] = row
+            self._configure_row(row, item, selected_keys)
+        for item in ordered_items:
+            if item.parent_key is None:
+                continue
+            parent_row = rows.get(item.parent_key)
+            if parent_row is None:
+                parent_row = QTreeWidgetItem(self.tree)
+            row = QTreeWidgetItem(parent_row)
+            rows[item.key] = row
+            self._configure_row(row, item, selected_keys)
+
+        for item in ordered_items:
+            if not item.is_group:
+                continue
+            row = rows.get(item.key)
+            if row is None:
+                continue
+            row.setFlags(
+                row.flags()
+                | Qt.ItemFlag.ItemIsUserCheckable
+                | Qt.ItemFlag.ItemIsAutoTristate
+            )
+            checked_children = sum(
+                row.child(index).checkState(0) == Qt.CheckState.Checked
+                for index in range(row.childCount())
+            )
+            if checked_children == row.childCount() and row.childCount():
+                row.setCheckState(0, Qt.CheckState.Checked)
+            elif checked_children:
+                row.setCheckState(0, Qt.CheckState.PartiallyChecked)
+            else:
+                row.setCheckState(0, Qt.CheckState.Unchecked)
+            row.setExpanded(True)
+
+        self.summary = QLabel()
+        self.summary.setObjectName("SelectionSummary")
+        root.addWidget(self.summary)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText(t("analysis.apply"))
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText(t("analysis.cancel"))
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        root.addWidget(buttons)
+
+        self.search.textChanged.connect(self._apply_filters)
+        self.type_filter.currentIndexChanged.connect(self._apply_filters)
+        self.tree.itemChanged.connect(lambda *_args: self._update_summary())
+        select_all.clicked.connect(lambda: self._set_all(True))
+        select_none.clicked.connect(lambda: self._set_all(False))
+        self._update_summary()
+
+    @staticmethod
+    def _configure_row(row, item, selected_keys) -> None:
+        row.setData(0, Qt.ItemDataRole.UserRole, item.key)
+        row.setData(0, Qt.ItemDataRole.UserRole + 1, item.scope)
+        row.setText(1, f"{item.icon} {item.name}")
+        row.setToolTip(1, item.path)
+        row.setText(2, item.kind)
+        row.setText(3, f"{item.translated}/{item.total} · {item.percent}%")
+        if not item.is_group:
+            row.setFlags(row.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            row.setCheckState(
+                0,
+                Qt.CheckState.Checked
+                if item.key in selected_keys
+                else Qt.CheckState.Unchecked,
+            )
+
+    def _leaf_rows(self):
+        for index in range(self.tree.topLevelItemCount()):
+            root = self.tree.topLevelItem(index)
+            if root.childCount():
+                for child_index in range(root.childCount()):
+                    yield root.child(child_index)
+            else:
+                yield root
+
+    def selected_keys(self) -> frozenset[str]:
+        return frozenset(
+            row.data(0, Qt.ItemDataRole.UserRole)
+            for row in self._leaf_rows()
+            if row.checkState(0) == Qt.CheckState.Checked
+        )
+
+    def _set_all(self, checked: bool) -> None:
+        state = Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
+        self.tree.blockSignals(True)
+        try:
+            for row in self._leaf_rows():
+                row.setCheckState(0, state)
+        finally:
+            self.tree.blockSignals(False)
+        self._update_summary()
+
+    def _apply_filters(self) -> None:
+        query = self.search.text().strip().casefold()
+        scope = self.type_filter.currentData() or "all"
+        for index in range(self.tree.topLevelItemCount()):
+            root = self.tree.topLevelItem(index)
+            root_match = scope in ("all", root.data(0, Qt.ItemDataRole.UserRole + 1))
+            visible_children = 0
+            for child_index in range(root.childCount()):
+                child = root.child(child_index)
+                text_match = query in " ".join(
+                    child.text(column) for column in range(1, 4)
+                ).casefold()
+                visible = root_match and text_match
+                child.setHidden(not visible)
+                visible_children += int(visible)
+            if root.childCount():
+                root_text_match = query in " ".join(
+                    root.text(column) for column in range(1, 4)
+                ).casefold()
+                root.setHidden(not root_match or (not root_text_match and not visible_children))
+            else:
+                text_match = query in " ".join(
+                    root.text(column) for column in range(1, 4)
+                ).casefold()
+                root.setHidden(not root_match or not text_match)
+
+    def _update_summary(self) -> None:
+        selected = len(self.selected_keys())
+        total = sum(1 for _row in self._leaf_rows())
+        self.summary.setText(t("analysis.selected_summary", selected=selected, total=total))
 
 
 class SettingsDialog(QDialog):
@@ -54,20 +254,60 @@ class SettingsDialog(QDialog):
         root.setContentsMargins(16, 16, 16, 16)
         root.setSpacing(12)
 
-        tabs = QTabWidget()
-        root.addWidget(tabs, 1)
+        self.tabs = QTabWidget()
+        root.addWidget(self.tabs, 1)
 
         ai_tab, ai_layout = self._scroll_tab()
+        lm_tab, lm_layout = self._scroll_tab()
         or_tab, or_layout = self._scroll_tab()
         general_tab, general_layout = self._scroll_tab()
-        tabs.addTab(ai_tab, t("settings.tab.local"))
-        tabs.addTab(or_tab, t("settings.tab.openrouter"))
-        tabs.addTab(general_tab, t("settings.tab.general"))
+        self.tabs.addTab(ai_tab, t("settings.tab.local"))
+        self.tabs.addTab(lm_tab, t("settings.tab.lmstudio"))
+        self.tabs.addTab(or_tab, t("settings.tab.openrouter"))
+        self.tabs.addTab(general_tab, t("settings.tab.general"))
 
         self.ai_exe = self._file_row(ai_layout, t("settings.local_exe"), config.get("AI", "exe_path"), "Executables (*.exe)")
         self.ai_model = self._file_row(ai_layout, t("settings.model"), config.get("AI", "model_path"), "GGUF Models (*.gguf)")
         self.gpu_layers = self._slider_row(ai_layout, t("settings.gpu_layers"), config.getint("AI", "gpu_layers", 99), 0, 99)
         ai_layout.addStretch(1)
+
+        lm_note = QLabel(t("settings.lm_note"))
+        lm_note.setObjectName("MutedLabel")
+        lm_note.setWordWrap(True)
+        lm_layout.addWidget(lm_note)
+        self.lm_url = self._line_row(
+            lm_layout,
+            t("settings.lm_url"),
+            config.get("LMSTUDIO", "base_url"),
+        )
+        self.lm_key = self._line_row(
+            lm_layout,
+            t("settings.lm_key"),
+            config.get("LMSTUDIO", "api_key"),
+            secret=True,
+        )
+        lm_layout.addWidget(self._field_label(t("settings.model_id")))
+        self.lm_model = QComboBox()
+        self.lm_model.setEditable(True)
+        self.lm_model.setCurrentText(config.get("LMSTUDIO", "model"))
+        lm_layout.addWidget(self.lm_model)
+        lm_actions = QHBoxLayout()
+        self.lm_refresh = QPushButton(t("settings.lm_refresh"))
+        self.lm_test = QPushButton(t("settings.lm_test"))
+        lm_actions.addWidget(self.lm_refresh)
+        lm_actions.addWidget(self.lm_test)
+        lm_actions.addStretch(1)
+        lm_layout.addLayout(lm_actions)
+        self.lm_status = QLabel(t("settings.lm_idle"))
+        self.lm_status.setObjectName("MutedLabel")
+        self.lm_status.setWordWrap(True)
+        lm_layout.addWidget(self.lm_status)
+        lm_layout.addStretch(1)
+        self._lmstudio_signals = LmStudioSignals(self)
+        self._lmstudio_signals.finished.connect(self._lmstudio_probe_finished)
+        self._lmstudio_worker: threading.Thread | None = None
+        self.lm_refresh.clicked.connect(self._start_lmstudio_probe)
+        self.lm_test.clicked.connect(self._start_lmstudio_probe)
 
         note = QLabel(t("settings.or_note"))
         note.setObjectName("MutedLabel")
@@ -167,6 +407,51 @@ class SettingsDialog(QDialog):
         if path:
             edit.setText(path)
 
+    def _start_lmstudio_probe(self, *_args) -> None:
+        if self._lmstudio_worker and self._lmstudio_worker.is_alive():
+            return
+        self.lm_refresh.setEnabled(False)
+        self.lm_test.setEnabled(False)
+        self.lm_status.setText(t("settings.lm_checking"))
+        base_url = self.lm_url.text()
+        api_key = self.lm_key.text()
+
+        def task() -> None:
+            try:
+                models = list_lmstudio_models(base_url, api_key=api_key)
+            except Exception as exc:
+                self._lmstudio_signals.finished.emit(False, [], str(exc))
+            else:
+                self._lmstudio_signals.finished.emit(True, models, "")
+
+        self._lmstudio_worker = threading.Thread(target=task, daemon=True)
+        self._lmstudio_worker.start()
+
+    def _lmstudio_probe_finished(
+        self,
+        success: bool,
+        models: list[str],
+        error: str,
+    ) -> None:
+        self._lmstudio_worker = None
+        self.lm_refresh.setEnabled(True)
+        self.lm_test.setEnabled(True)
+        if not success:
+            self.lm_status.setText(t("settings.lm_error", error=error))
+            return
+
+        current = self.lm_model.currentText().strip()
+        self.lm_model.clear()
+        self.lm_model.addItems(models)
+        if current:
+            self.lm_model.setCurrentText(current)
+        elif models:
+            self.lm_model.setCurrentIndex(0)
+        if models:
+            self.lm_status.setText(t("settings.lm_models_found", count=len(models)))
+        else:
+            self.lm_status.setText(t("settings.lm_no_models"))
+
     def _save(self) -> None:
         self.config.set_many("AI", {
             "exe_path": self.ai_exe.text(),
@@ -180,6 +465,11 @@ class SettingsDialog(QDialog):
             "model": self.or_model.text().strip(),
             "site_url": self.or_site.text().strip(),
             "app_name": self.or_app.text().strip(),
+        })
+        self.config.set_many("LMSTUDIO", {
+            "base_url": normalize_lmstudio_base_url(self.lm_url.text()),
+            "api_key": self.lm_key.text().strip(),
+            "model": self.lm_model.currentText().strip(),
         })
         self.config.set_many("GENERAL", {
             "smart_glue": self.smart_glue.isChecked(),

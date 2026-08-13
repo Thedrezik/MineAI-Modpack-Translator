@@ -1,9 +1,11 @@
-import os
+﻿import os
 import unittest
+from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 try:
+    from PyQt6.QtCore import Qt
     from PyQt6.QtWidgets import QApplication, QToolButton
     from mineai.config import settings
     from mineai.gui_qt.dialogs import SettingsDialog
@@ -11,6 +13,7 @@ try:
     from mineai.gui_qt.main_window import TranslatorQtWindow
     from mineai.gui_qt.widgets import ScrollSafeComboBox, ScrollSafeSpinBox
 except ImportError:
+    Qt = None
     QApplication = None
     QToolButton = None
     settings = None
@@ -113,6 +116,69 @@ class WheelSafetyTests(unittest.TestCase):
         finally:
             window.close()
 
+    def test_primary_translation_choices_are_restored_and_saved(self):
+        original = {
+            key: settings.get("GENERAL", key)
+            if settings._config.has_option("GENERAL", key)
+            else ""
+            for key in ("minecraft_version", "target_language", "translation_engine")
+        }
+        settings.set_many(
+            "GENERAL",
+            {
+                "minecraft_version": "1.21.1",
+                "target_language": "Deutsch",
+                "translation_engine": "LM Studio",
+            },
+        )
+        window = TranslatorQtWindow()
+        try:
+            self.assertEqual(window.version_combo.currentText(), "1.21.1")
+            self.assertEqual(window.language_combo.currentText(), "Deutsch")
+            self.assertEqual(window.engine_combo.currentText(), "LM Studio")
+
+            window.version_combo.setCurrentText("1.20.1")
+            window.language_combo.setCurrentText("Русский")
+            window.engine_combo.setCurrentText("Google")
+            self.app.processEvents()
+
+            self.assertEqual(settings.get("GENERAL", "minecraft_version"), "1.20.1")
+            self.assertEqual(settings.get("GENERAL", "target_language"), "Русский")
+            self.assertEqual(settings.get("GENERAL", "translation_engine"), "Google")
+        finally:
+            window.close()
+            settings.set_many("GENERAL", original)
+
+    def test_cache_recovery_checkbox_disables_modes_and_uses_local_ai(self):
+        previous = settings.get("GENERAL", "cache_recovery_mode")
+        settings.set("GENERAL", "cache_recovery_mode", False)
+        window = TranslatorQtWindow()
+        try:
+            window.engine_combo.setCurrentText("Google")
+            window.cache_recovery_checkbox.setChecked(True)
+            self.app.processEvents()
+
+            self.assertTrue(window.cache_recovery_checkbox.isChecked())
+            self.assertEqual(
+                window._translation_options().cache_recovery_mode,
+                True,
+            )
+            self.assertEqual(
+                window._translation_options().ai_provider,
+                "local",
+            )
+            self.assertTrue(window.ai_fallback.isChecked())
+            self.assertFalse(window.ai_fallback.isEnabled())
+            self.assertTrue(
+                all(not button.isEnabled() for button in window.mode_buttons.values())
+            )
+            self.assertTrue(
+                settings.getboolean("GENERAL", "cache_recovery_mode")
+            )
+        finally:
+            window.close()
+            settings.set("GENERAL", "cache_recovery_mode", previous)
+
     def test_log_toolbar_has_only_clear_and_export_actions(self):
         window = TranslatorQtWindow()
         try:
@@ -134,6 +200,42 @@ class WheelSafetyTests(unittest.TestCase):
             self.assertIsInstance(window.interface_language, QToolButton)
             self.assertIn(window.interface_language.text(), {"RU", "EN"})
             self.assertEqual(window.interface_language.width(), 46)
+        finally:
+            window.close()
+
+    def test_analysis_items_use_compact_dialog_launcher_and_can_be_excluded(self):
+        window = TranslatorQtWindow()
+        try:
+            self.assertTrue(hasattr(window, "analysis_configure_button"))
+            self.assertFalse(hasattr(window, "analysis_tree"))
+
+            target = SimpleNamespace(
+                key="mods:C:/modpack/mods/example.jar",
+                path="C:/modpack/mods/example.jar",
+                icon="📦",
+                name="Example Mod",
+                kind="Интерфейс",
+                translated=2,
+                total=10,
+                percent=20,
+                parent_key=None,
+                is_group=False,
+            )
+            window._append_analysis_item(target)
+
+            self.assertEqual(
+                window._selected_analysis_items(),
+                frozenset({target.key}),
+            )
+            self.assertIn("1", window.analysis_summary.text())
+
+            window._set_all_analysis_items(False)
+            self.assertEqual(window._selected_analysis_items(), frozenset())
+
+            window._worker = SimpleNamespace(is_alive=lambda: True)
+            window._refresh_analysis_summary()
+            self.assertFalse(window.analysis_configure_button.isEnabled())
+            window._worker = None
         finally:
             window.close()
 

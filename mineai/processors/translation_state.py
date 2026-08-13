@@ -1,4 +1,4 @@
-"""Shared completion detection for in-place quest formats.
+﻿"""Shared completion detection for in-place quest formats.
 
 Russian/CJK targets can still use their distinct-script regex safely. Latin
 languages share the source script with English, so their accented-character
@@ -12,7 +12,7 @@ from mineai.processors.selection import (
     collect_bq_selection,
     collect_snbt_selection,
 )
-from mineai.processors.snbt_extract import extract_snbt_strings
+from mineai.processors.snbt_extract import build_snbt_baseline_document
 
 
 def collect_bq_selection_with_baseline(
@@ -40,6 +40,7 @@ def collect_bq_selection_with_baseline(
         betterquesting_key=current.betterquesting_key,
         total_translatable=current.total_translatable,
         pending=pending,
+        document=current.document,
     )
 
 
@@ -50,6 +51,7 @@ def collect_snbt_selection_with_baseline(
     target_regex: str,
     *,
     same_latin_script: bool,
+    allowed_entry_ids: set[str] | frozenset[str] | None = None,
 ) -> SnbtSelection:
     if mode == "force" or not same_latin_script:
         return collect_snbt_selection(
@@ -57,21 +59,21 @@ def collect_snbt_selection_with_baseline(
             current_content,
             mode,
             target_regex,
+            allowed_entry_ids=allowed_entry_ids,
         )
 
-    original_strings = extract_snbt_strings(original_content)
-    current_strings = extract_snbt_strings(current_content)
-
-    # The backup and current file keep the same field order during MineAI's own
-    # in-place edits. An unchanged value is still source text; a changed value is
-    # a previous translation. Values appended after the backup was created are
-    # new source entries and must also be translated.
-    pending = [
-        text
-        for index, text in enumerate(current_strings)
-        if index >= len(original_strings) or text == original_strings[index]
-    ]
+    document = build_snbt_baseline_document(
+        original_content,
+        current_content,
+        allowed_entry_ids=allowed_entry_ids,
+    )
+    pending = document.pending_source_values(
+        mode,
+        target_regex,
+        same_latin_script=True,
+    )
     return SnbtSelection(
-        total_translatable=len(current_strings),
-        pending=list(dict.fromkeys(pending)),
+        total_translatable=len(document.unique_translatable_sources()),
+        pending=list(pending),
+        document=document,
     )

@@ -1,4 +1,5 @@
-import os
+﻿import os
+import json
 import tempfile
 import unittest
 from unittest import mock
@@ -9,8 +10,9 @@ with tempfile.TemporaryDirectory() as _import_cwd:
     try:
         from mineai.cache import TranslationCache
         from mineai.engines.base import EngineCallbacks, TranslationEngine
+        from mineai.engines.google import GoogleEngine
         from mineai.engines.service import TranslationService
-        from mineai.text_processing import is_technical_term
+        from mineai.text_processing import is_technical_term, polish_translation
     finally:
         os.chdir(_original_cwd)
 
@@ -70,6 +72,9 @@ class _MemoryCache:
     def save_if_threshold(self):
         pass
 
+    def save(self):
+        pass
+
 
 class _Engine(TranslationEngine):
     def __init__(self, response_factory):
@@ -82,8 +87,24 @@ class _Engine(TranslationEngine):
 
 
 class _Service(TranslationService):
-    def __init__(self, engine, cache, config):
-        super().__init__("ai", cache, config, ai_batch=20)
+    def __init__(
+        self,
+        engine,
+        cache,
+        config,
+        *,
+        engine_name="ai",
+        fallback_caches=None,
+        force_google_fallback=False,
+    ):
+        super().__init__(
+            engine_name,
+            cache,
+            config,
+            ai_batch=20,
+            fallback_caches=fallback_caches,
+            force_google_fallback=force_google_fallback,
+        )
         self.engine = engine
 
     def _build_engine(self, context="", prompt_type="mods"):
@@ -102,6 +123,299 @@ def _callbacks(logs, progress=None):
 
 
 class TranslationServiceRegressionTests(unittest.TestCase):
+    def test_cache_recovery_uses_valid_google_cache_after_invalid_ai_cache(self):
+        source = "Power: %s"
+        ai_cache = _MemoryCache()
+        google_cache = _MemoryCache()
+        ai_cache.values[("ru", source)] = "Мощность:"
+        google_cache.values[("ru", source)] = "Мощность: %s"
+        engine = _Engine(lambda _items: self.fail("local AI must be skipped"))
+        logs = []
+
+        result = _Service(
+            engine,
+            ai_cache,
+            _Config(),
+            fallback_caches=[("Google-кэш", google_cache)],
+        ).translate_dict(
+            {"key": source},
+            TARGET_LANG,
+            _callbacks(logs),
+        )
+
+        self.assertEqual(result, {"key": "Мощность: %s"})
+        self.assertEqual(ai_cache.discarded, [("ru", source, False)])
+        self.assertEqual(ai_cache.values[("ru", source)], "Мощность: %s")
+        self.assertEqual(engine.calls, [])
+        self.assertTrue(any("Google-кэш" in message for message, _ in logs))
+
+    def test_cache_recovery_forces_google_fallback_after_local_ai_failure(self):
+        source = "Herbalist Bench"
+        google = mock.Mock()
+        google.translate_batch.return_value = {"key": "Стол травника"}
+
+        with mock.patch(
+            "mineai.engines.service.GoogleEngine",
+            return_value=google,
+        ):
+            result = _Service(
+                _Engine(lambda _items: {}),
+                _MemoryCache(),
+                _Config(fallback_google=False),
+                force_google_fallback=True,
+            ).translate_dict(
+                {"key": source},
+                TARGET_LANG,
+                _callbacks([]),
+            )
+
+        self.assertEqual(result, {"key": "Стол травника"})
+        google.translate_batch.assert_called_once()
+
+    def test_modonomicon_color_tokens_are_atomic_for_ai_and_google(self):
+        source = "[#] (8B0000)Blood Wood[#] () is powerful."
+        translated = "[#] (8B0000)Кровавая древесина[#] () очень прочна."
+
+        for engine_name in ("ai", "google"):
+            with self.subTest(engine=engine_name):
+                def translate(items):
+                    item = next(iter(items.values()))
+                    self.assertNotIn("8B0000", item.masked)
+                    self.assertNotIn("[#]", item.masked)
+                    return {item.key: translated}
+
+                result = _Service(
+                    _Engine(translate),
+                    _MemoryCache(),
+                    _Config(),
+                    engine_name=engine_name,
+                ).translate_dict(
+                    {"entry": source},
+                    TARGET_LANG,
+                    _callbacks([]),
+                    prompt_type="books",
+                )
+
+                self.assertEqual(result, {"entry": translated})
+
+    def test_google_finalizer_restores_source_boundary_newline(self):
+        source = "Description\r\n"
+        masked, mapping = __import__(
+            "mineai.text_processing",
+            fromlist=["mask_protected_fragments"],
+        ).mask_protected_fragments(source)
+        item = __import__(
+            "mineai.engines.base",
+            fromlist=["EngineItem"],
+        ).EngineItem("entry", source, masked, mapping)
+        raw = masked.replace("Description", "Описание")
+
+        result = GoogleEngine(workers=1, mode="single")._finalize(raw, item)
+
+        self.assertEqual(result, "Описание\r\n")
+
+    def test_article_only_technical_label_is_valid_for_all_engines(self):
+        for engine_name in ("ai", "google"):
+            with self.subTest(engine=engine_name):
+                engine = _Engine(lambda items: {next(iter(items)): "UI"})
+                result = _Service(
+                    engine,
+                    _MemoryCache(),
+                    _Config(),
+                    engine_name=engine_name,
+                ).translate_dict(
+                    {"label": "The UI"},
+                    TARGET_LANG,
+                    _callbacks([]),
+                    prompt_type="books",
+                )
+
+                self.assertEqual(result, {"label": "UI"})
+
+    def test_russian_article_and_punctuation_fragment_may_lose_all_letters(self):
+        for engine_name in ("ai", "google"):
+            with self.subTest(engine=engine_name):
+                engine = _Engine(lambda items: {next(iter(items)): "."})
+                result = _Service(
+                    engine,
+                    _MemoryCache(),
+                    _Config(),
+                    engine_name=engine_name,
+                ).translate_dict(
+                    {"fragment": ". The"},
+                    TARGET_LANG,
+                    _callbacks([]),
+                    prompt_type="books",
+                )
+
+                self.assertEqual(result, {"fragment": "."})
+
+    def test_russian_article_rule_cannot_erase_entire_value(self):
+        engine = _Engine(lambda items: {next(iter(items)): ""})
+
+        result = _Service(engine, _MemoryCache(), _Config()).translate_dict(
+            {"fragment": "The"},
+            TARGET_LANG,
+            _callbacks([]),
+            prompt_type="books",
+        )
+
+        self.assertEqual(result, {"fragment": "The"})
+
+    def test_formatted_translation_never_sends_markup_or_markers_to_engine(self):
+        source = (
+            "$(#BB00BB)Epic$() items and "
+            '<ItemLink id="ae2:controller" /> are useful.'
+        )
+
+        def translate(items):
+            exposed = " ".join(item.original for item in items.values())
+            self.assertNotIn("$(#", exposed)
+            self.assertNotIn("ItemLink", exposed)
+            self.assertNotIn("[#", exposed)
+            return {
+                key: (
+                    item.original.replace("Epic", "Эпические")
+                    .replace("items and", "предметы и")
+                    .replace("are useful", "полезны")
+                )
+                for key, item in items.items()
+            }
+
+        engine = _Engine(translate)
+        result = _Service(engine, _MemoryCache(), _Config()).translate_formatted_dict(
+            {"page": source},
+            TARGET_LANG,
+            _callbacks([]),
+            context="demo/page.md",
+            prompt_type="books",
+        )
+
+        self.assertIn("$(#BB00BB)", result["page"])
+        self.assertIn('<ItemLink id="ae2:controller" />', result["page"])
+        self.assertNotIn("[#", result["page"])
+
+    def test_formatted_translation_sends_one_contextual_unit_around_markup(self):
+        source = "The $(item) Augmenting Table is used for upgrades."
+
+        def translate(items):
+            self.assertEqual(len(items), 1)
+            item = next(iter(items.values()))
+            self.assertIn("The", item.original)
+            self.assertIn("Augmenting Table is used for upgrades", item.original)
+            self.assertNotIn("$(item)", item.original)
+            return {
+                item.key: item.original.replace(
+                    "The",
+                    "Стол ",
+                ).replace(
+                    "Augmenting Table is used for upgrades.",
+                    "используется для улучшений.",
+                )
+            }
+
+        engine = _Engine(translate)
+        result = _Service(engine, _MemoryCache(), _Config()).translate_formatted_dict(
+            {"page": source},
+            TARGET_LANG,
+            _callbacks([]),
+            context="demo/page.json",
+            prompt_type="books",
+        )
+
+        self.assertEqual(
+            result["page"],
+            "Стол $(item) используется для улучшений.",
+        )
+
+    def test_formatted_validation_does_not_join_text_across_anchors(self):
+        source = "The value is zero.$(p)Apotheosis changes the default."
+
+        def translate(items):
+            item = next(iter(items.values()))
+            return {
+                item.key: item.original.replace(
+                    "The value is zero.",
+                    "Значение равно нулю.",
+                ).replace(
+                    "Apotheosis changes the default.",
+                    "Apotheosis изменяет значение по умолчанию.",
+                )
+            }
+
+        result = _Service(
+            _Engine(translate),
+            _MemoryCache(),
+            _Config(),
+        ).translate_formatted_dict(
+            {"page": source},
+            TARGET_LANG,
+            _callbacks([]),
+            context="demo/page.json",
+            prompt_type="books",
+        )
+
+        self.assertEqual(
+            result["page"],
+            "Значение равно нулю.$(p)Apotheosis изменяет значение по умолчанию.",
+        )
+
+    def test_failed_long_formatted_node_is_retried_in_smaller_segments(self):
+        sentence = "This sentence explains the machine clearly. "
+        source = (sentence * 20).rstrip()
+
+        def translate(items):
+            if not all("::segment::" in key for key in items):
+                return {}
+            return {
+                key: item.original.replace(
+                    "This sentence explains the machine clearly.",
+                    "Это предложение понятно объясняет работу машины.",
+                )
+                for key, item in items.items()
+            }
+
+        result = _Service(
+            _Engine(translate),
+            _MemoryCache(),
+            _Config(),
+        ).translate_formatted_dict(
+            {"page": source},
+            TARGET_LANG,
+            _callbacks([]),
+            context="demo/large_page.json",
+            prompt_type="books",
+        )
+
+        self.assertEqual(
+            result["page"],
+            ("Это предложение понятно объясняет работу машины. " * 20).rstrip(),
+        )
+
+    def test_formatted_cache_is_scoped_by_page_and_node(self):
+        cache = _MemoryCache()
+        engine = _Engine(
+            lambda items: {
+                key: "Перевод " + item.original
+                for key, item in items.items()
+            }
+        )
+        service = _Service(engine, cache, _Config())
+
+        service.translate_formatted_dict(
+            {"page-a": "Open [Guide](a.md).", "page-b": "Open [Guide](b.md)."},
+            TARGET_LANG,
+            _callbacks([]),
+            context="demo",
+            prompt_type="books",
+        )
+
+        scoped_sources = [source for language, source in cache.values]
+        self.assertTrue(all(language == "ru" for language, _ in cache.values))
+        self.assertEqual(len(scoped_sources), len(set(scoped_sources)))
+        self.assertTrue(any("page-a" in source for source in scoped_sources))
+        self.assertTrue(any("page-b" in source for source in scoped_sources))
+
     def test_identical_sources_are_sent_to_engine_once(self):
         engine = _Engine(lambda items: {next(iter(items)): "Список"})
         logs, progress = [], []
@@ -164,6 +478,160 @@ class TranslationServiceRegressionTests(unittest.TestCase):
         self.assertEqual(cache.discarded, [("ru", "Power: %s", False)])
         self.assertTrue(any("кэша отброшена" in msg for msg, _ in logs))
 
+    def test_cached_translation_with_extra_newline_is_discarded_and_retranslated(self):
+        cache = _MemoryCache()
+        cache.values[("ru", "Engineer's Crafting Table")] = (
+            "Верстак инженера\nДополнение"
+        )
+        engine = _Engine(lambda items: {next(iter(items)): "Верстак инженера"})
+
+        result = _Service(engine, cache, _Config()).translate_dict(
+            {"key": "Engineer's Crafting Table"},
+            TARGET_LANG,
+            _callbacks([]),
+        )
+
+        self.assertEqual(result, {"key": "Верстак инженера"})
+        self.assertEqual(
+            cache.discarded,
+            [("ru", "Engineer's Crafting Table", False)],
+        )
+        self.assertEqual(len(engine.calls), 1)
+
+    def test_repaired_ai_cache_entry_is_persisted_immediately(self):
+        source = (
+            "The grid fills itself when the items are ready, meaning you do "
+            "not have to keep checking if the items are available."
+        )
+        incomplete = (
+            "Сетка заполняется автоматически, meaning you do not have to "
+            "keep checking if the items are available."
+        )
+        fixed = (
+            "Сетка заполняется автоматически, когда предметы готовы, поэтому "
+            "не нужно постоянно проверять их наличие."
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "ai_cache.json")
+            cache = TranslationCache(path)
+            cache.set("ru", source, incomplete)
+            cache.save()
+            engine = _Engine(lambda items: {next(iter(items)): fixed})
+
+            result = _Service(engine, cache, _Config()).translate_dict(
+                {"key": source},
+                TARGET_LANG,
+                _callbacks([]),
+            )
+
+            self.assertEqual(result, {"key": fixed})
+            self.assertEqual(
+                TranslationCache(path).get("ru", source),
+                (fixed, False),
+            )
+
+    def test_cached_translation_with_wrong_inline_markdown_is_retranslated(self):
+        source = "find the recipe again, and click move *again*."
+        cache = _MemoryCache()
+        cache.values[("ru", source)] = (
+            "С **ae2helpers** вы просто запрашиваете крафт."
+        )
+        engine = _Engine(
+            lambda items: {
+                next(iter(items)): "Найдите рецепт и нажмите *снова*."
+            }
+        )
+
+        result = _Service(engine, cache, _Config()).translate_dict(
+            {"key": source},
+            TARGET_LANG,
+            _callbacks([]),
+        )
+
+        self.assertEqual(
+            result,
+            {"key": "Найдите рецепт и нажмите *снова*."},
+        )
+        self.assertEqual(cache.discarded, [("ru", source, False)])
+        self.assertEqual(len(engine.calls), 1)
+
+    def test_reordered_patchouli_codes_are_rejected(self):
+        source = "$(#BB00BB)Epic$() items use $(#5555FF)Simple$() tables."
+        broken = "$(#5555FF)Эпические$() предметы используют $(#BB00BB)простые$() столы."
+        fixed = "$(#BB00BB)Эпические$() предметы используют $(#5555FF)простые$() столы."
+        cache = _MemoryCache()
+        cache.values[("ru", source)] = broken
+        engine = _Engine(lambda items: {next(iter(items)): fixed})
+
+        result = _Service(engine, cache, _Config()).translate_dict(
+            {"key": source}, TARGET_LANG, _callbacks([])
+        )
+
+        self.assertEqual(result, {"key": fixed})
+        self.assertEqual(cache.discarded, [("ru", source, False)])
+
+    def test_invented_patchouli_code_is_rejected(self):
+        source = "The refinery produces two millibuckets (2mB) per tick."
+        broken = "Переработчик производит два миллибакета $(2mB) за тик."
+        engine = _Engine(lambda items: {next(iter(items)): broken})
+
+        result = _Service(engine, _MemoryCache(), _Config()).translate_dict(
+            {"key": source}, TARGET_LANG, _callbacks([])
+        )
+
+        self.assertEqual(result, {"key": source})
+
+    def test_extreme_cached_length_mismatch_is_retranslated(self):
+        source = (
+            "When fully upgraded, the machine exports items to every connected "
+            "inventory automatically."
+        )
+        cache = _MemoryCache()
+        cache.values[("ru", source)] = "Экспорт"
+        engine = _Engine(
+            lambda items: {
+                next(iter(items)): (
+                    "После полного улучшения машина автоматически экспортирует "
+                    "предметы во все подключённые хранилища."
+                )
+            }
+        )
+
+        result = _Service(engine, cache, _Config()).translate_dict(
+            {"key": source}, TARGET_LANG, _callbacks([])
+        )
+
+        self.assertNotEqual(result["key"], "Экспорт")
+        self.assertEqual(cache.discarded, [("ru", source, False)])
+
+    def test_protected_only_item_quantity_can_remain_identical(self):
+        source = '1x <ItemLink id="energy_acceptor" />'
+        cache = _MemoryCache()
+        engine = _Engine(lambda items: {next(iter(items)): source})
+
+        result = _Service(engine, cache, _Config()).translate_dict(
+            {"key": source}, TARGET_LANG, _callbacks([])
+        )
+
+        self.assertEqual(result, {"key": source})
+        self.assertIn(("ru", source), cache.identities)
+
+    def test_direct_google_rejects_reordered_protected_link_fragments(self):
+        source = "Read [Guide](guide.md)."
+        broken = "](guide.md)Читайте руководство[."
+        engine = _Engine(lambda items: {next(iter(items)): broken})
+
+        result = _Service(
+            engine,
+            _MemoryCache(),
+            _Config(),
+            engine_name="google",
+        ).translate_dict({"key": source}, TARGET_LANG, _callbacks([]))
+
+        self.assertEqual(result, {"key": source})
+
+
     def test_google_fallback_rejection_is_logged(self):
         source = "Original value"
         google = mock.Mock()
@@ -184,6 +652,188 @@ class TranslationServiceRegressionTests(unittest.TestCase):
         self.assertTrue(any("не принято 1 строк" in msg for msg, _ in logs))
         self.assertTrue(any("Строка не переведена" in msg for msg, _ in logs))
 
+    def test_format_validator_rejection_uses_google_fallback(self):
+        source = "Text with protected anchors"
+        primary = _Engine(
+            lambda items: {next(iter(items)): "Русский, но сломанный"}
+        )
+        google = mock.Mock()
+        google.translate_batch.return_value = {
+            "key": "Корректный русский перевод"
+        }
+
+        with mock.patch(
+            "mineai.engines.service.GoogleEngine",
+            return_value=google,
+        ):
+            result = _Service(
+                primary,
+                _MemoryCache(),
+                _Config(fallback_google=True),
+            ).translate_dict(
+                {"key": source},
+                TARGET_LANG,
+                _callbacks([]),
+                candidate_validators={
+                    "key": lambda candidate: (
+                        "структура изменена"
+                        if candidate == "Русский, но сломанный"
+                        else None
+                    )
+                },
+            )
+
+        self.assertEqual(result, {"key": "Корректный русский перевод"})
+        google.translate_batch.assert_called_once()
+
+    def test_format_validator_rejection_gets_strict_local_retry(self):
+        calls = 0
+
+        def translate(items):
+            nonlocal calls
+            calls += 1
+            return {
+                next(iter(items)): (
+                    "Русский, но сломанный"
+                    if calls == 1
+                    else "Корректный русский перевод"
+                )
+            }
+
+        result = _Service(
+            _Engine(translate),
+            _MemoryCache(),
+            _Config(fallback_google=False),
+        ).translate_dict(
+            {"key": "Text with protected anchors"},
+            TARGET_LANG,
+            _callbacks([]),
+            candidate_validators={
+                "key": lambda candidate: (
+                    "FormatKit: структура изменена"
+                    if candidate == "Русский, но сломанный"
+                    else None
+                )
+            },
+        )
+
+        self.assertEqual(result, {"key": "Корректный русский перевод"})
+        self.assertEqual(calls, 2)
+
+    def test_format_validator_rejection_gets_strict_google_retry(self):
+        source = "Text with protected anchors"
+        primary = _Engine(
+            lambda items: {next(iter(items)): "Русский, но сломанный"}
+        )
+        retry = mock.Mock()
+        retry.translate_batch.return_value = {
+            "key": "Корректный русский перевод"
+        }
+
+        with mock.patch(
+            "mineai.engines.service.GoogleEngine",
+            return_value=retry,
+        ):
+            result = _Service(
+                primary,
+                _MemoryCache(),
+                _Config(fallback_google=False),
+                engine_name="google",
+            ).translate_dict(
+                {"key": source},
+                TARGET_LANG,
+                _callbacks([]),
+                candidate_validators={
+                    "key": lambda candidate: (
+                        "FormatKit: структура изменена"
+                        if candidate == "Русский, но сломанный"
+                        else None
+                    )
+                },
+            )
+
+        self.assertEqual(result, {"key": "Корректный русский перевод"})
+        retry.translate_batch.assert_called_once()
+
+    def test_anchor_rich_formatkit_blocks_use_small_batches_for_all_engines(self):
+        strings = {
+            f"key-{index}": f"Source {index} ⟦FK0000⟧ description"
+            for index in range(12)
+        }
+        validators = {key: lambda _candidate: None for key in strings}
+
+        for engine_name in ("ai", "google"):
+            with self.subTest(engine=engine_name):
+                engine = _Engine(
+                    lambda items: {
+                        key: item.original.replace("Source", "Источник").replace(
+                            "description",
+                            "описание",
+                        )
+                        for key, item in items.items()
+                    }
+                )
+                result = _Service(
+                    engine,
+                    _MemoryCache(),
+                    _Config(),
+                    engine_name=engine_name,
+                ).translate_dict(
+                    strings,
+                    TARGET_LANG,
+                    _callbacks([]),
+                    candidate_validators=validators,
+                )
+
+                self.assertEqual(len(result), len(strings))
+                self.assertLessEqual(max(map(len, engine.calls)), 5)
+
+    def test_failed_anchor_block_is_retranslated_by_visible_segments(self):
+        source = "First sentence.⟦FK0000⟧Second sentence."
+        expected = "Первое предложение.⟦FK0000⟧Второе предложение."
+
+        def translate(items):
+            if all("::segment::" in key for key in items):
+                values = {
+                    "First sentence.": "Первое предложение.",
+                    "Second sentence.": "Второе предложение.",
+                }
+                return {
+                    key: values[item.original]
+                    for key, item in items.items()
+                }
+            return {next(iter(items)): "Перевод без структурного якоря"}
+
+        result = _Service(
+            _Engine(translate),
+            _MemoryCache(),
+            _Config(fallback_google=False),
+        ).translate_dict(
+            {"key": source},
+            TARGET_LANG,
+            _callbacks([]),
+            candidate_validators={
+                "key": lambda candidate: (
+                    None if candidate == expected else "FormatKit: структура"
+                )
+            },
+        )
+
+        self.assertEqual(result, {"key": expected})
+
+    def test_scientific_binomial_link_label_is_intentional_identity(self):
+        source = "⟦FK0000⟧Xylocopa aerata]"
+        engine = _Engine(lambda _items: self.fail("engine must be skipped"))
+
+        result = _Service(engine, _MemoryCache(), _Config()).translate_dict(
+            {"key": source},
+            TARGET_LANG,
+            _callbacks([]),
+        )
+
+        self.assertEqual(result, {"key": source})
+        self.assertEqual(engine.calls, [])
+
     def test_russian_candidate_with_cjk_is_rejected(self):
         source = "Villager Egg Drop Chance"
         engine = _Engine(
@@ -201,8 +851,78 @@ class TranslationServiceRegressionTests(unittest.TestCase):
         self.assertTrue(is_technical_term("gui"))
         self.assertFalse(is_technical_term("Iron"))
 
+    def test_sentence_word_with_trailing_period_is_not_a_technical_term(self):
+        self.assertFalse(is_technical_term("dimensions."))
+        self.assertFalse(is_technical_term("energy."))
+        self.assertTrue(is_technical_term("guide.md"))
+
+    def test_code_identifiers_and_compound_technical_terms_are_ignored(self):
+        for value in (
+            "getAreaTypes()",
+            "setCount()",
+            "#header",
+            "#tier#",
+            "#mana_cost#",
+            "NBT UI",
+            "XNet",
+            "CuBee",
+        ):
+            with self.subTest(value=value):
+                self.assertTrue(is_technical_term(value))
+
+        self.assertFalse(is_technical_term("Pocket Computer Addons"))
+
+    def test_polish_translation_preserves_angle_tag_with_style_like_prefix(self):
+        self.assertEqual(
+            polish_translation("Список топлива <&list>"),
+            "Список топлива <&list>",
+        )
+
 
 class TranslationCacheIdentityTests(unittest.TestCase):
+    def test_any_ai_cache_version_preserves_valid_entries_during_upgrade(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "ai_cache.json")
+            with open(path, "w", encoding="utf-8") as stream:
+                json.dump(
+                    {
+                        "__mineai_ai_cache_validation_version__": "1",
+                        "ru_Description": "Описание",
+                        "ru_Power: %s": "Мощность:",
+                    },
+                    stream,
+                    ensure_ascii=False,
+                )
+
+            cache = TranslationCache(path)
+
+            self.assertEqual(
+                cache.get("ru", "Description"),
+                ("Описание", False),
+            )
+            self.assertTrue(os.path.exists(path + ".pre-auto-repair"))
+
+    def test_old_ai_cache_keeps_individually_valid_entries(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "ai_cache.json")
+            with open(path, "w", encoding="utf-8") as stream:
+                json.dump(
+                    {
+                        "__mineai_ai_cache_validation_version__": "26",
+                        "ru_Exactly one": "не более одного",
+                    },
+                    stream,
+                    ensure_ascii=False,
+                )
+
+            cache = TranslationCache(path)
+
+            self.assertEqual(
+                cache.get("ru", "Exactly one"),
+                ("не более одного", False),
+            )
+            self.assertTrue(os.path.exists(path + ".pre-auto-repair"))
+
     def test_identity_survives_reload_and_normalizes_newlines(self):
         with tempfile.TemporaryDirectory() as directory:
             previous_cwd = os.getcwd()

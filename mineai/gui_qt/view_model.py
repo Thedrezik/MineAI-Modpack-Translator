@@ -1,4 +1,4 @@
-"""Pure helpers for the Qt presentation layer.
+﻿"""Pure helpers for the Qt presentation layer.
 
 This module deliberately imports no Qt symbols so it can be unit-tested in the
 existing test suite even when the optional Qt dependency is not installed.
@@ -34,6 +34,7 @@ ENGINE_OPTIONS = {
     "Локальный ИИ": ("ai", "local"),
     "Local AI": ("ai", "local"),
     "OpenRouter": ("ai", "openrouter"),
+    "LM Studio": ("ai", "lmstudio"),
 }
 
 
@@ -132,6 +133,13 @@ def engine_readiness(config, engine_label: str) -> tuple[bool, str]:
         if not model:
             return False, tr("ready.openrouter_model")
         return True, f"OpenRouter · {model}"
+    if engine == "ai" and provider == "lmstudio":
+        if not config.get("LMSTUDIO", "base_url").strip():
+            return False, tr("ready.lmstudio_url")
+        model = config.get("LMSTUDIO", "model").strip()
+        if not model:
+            return False, tr("ready.lmstudio_model")
+        return True, f"LM Studio · {model}"
     if engine == "ai":
         model_path = config.get("AI", "model_path").strip()
         if not model_path:
