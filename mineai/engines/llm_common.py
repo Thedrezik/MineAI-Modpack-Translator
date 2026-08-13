@@ -1,4 +1,4 @@
-import json
+﻿import json
 import os
 import re
 from collections import Counter
@@ -8,9 +8,15 @@ import requests
 
 from mineai.engines.base import EngineCallbacks, EngineItem, TranslationEngine
 from mineai.io_utils import atomic_write_text
+from mineai.language_validation import has_untranslated_leading_article
 from mineai.text_processing import (
     PLACEHOLDER_PATTERN,
+    collapse_added_line_breaks,
+    count_line_breaks,
+    is_technical_term,
     polish_translation,
+    suspicious_duplicate_keys,
+    translation_length_issue,
     unmask_translation,
 )
 
@@ -24,7 +30,7 @@ def get_default_prompts() -> dict[str, str]:
         "mods": "Translate the following JSON string values from English to {lang_name}.",
         "books": "Ты локализатор Minecraft. Переведи текст книги/справочника на {lang_name}. Сохраняй игровой лор и литературный стиль.",
         "quests": "Ты локализатор Minecraft. Переведи строки мода/квеста «{context}» на {lang_name}. Сохраняй игровой стиль и лор.",
-        "technical": "STRICT RULES:\n1. Do not translate or change JSON keys.\n2. Preserve ALL [#N#] placeholders exactly. If a word is wrapped like [#0#]Word[#1#], wrap the translation like [#0#]Слово[#1#]. DO NOT drop any markers.\n3. MUST escape all newlines as \\n. DO NOT output raw/literal newlines inside the JSON strings.\n4. Output ONLY raw valid JSON. No markdown formatting, no explanations, no intro text."
+        "technical": "STRICT RULES:\n1. Do not translate or change JSON keys.\n2. Preserve ALL [#N#] placeholders exactly and in the same order. If a word is wrapped like [#0#]Word[#1#], wrap the translation like [#0#]Слово[#1#]. DO NOT drop, repeat or reorder markers.\n3. MUST escape all newlines as \\n. DO NOT output raw/literal newlines inside the JSON strings.\n4. Output ONLY raw valid JSON. No markdown formatting, no explanations, no intro text."
     }
 
 def load_prompts() -> dict[str, str]:
@@ -45,7 +51,8 @@ def save_prompts(prompts_dict: dict[str, str]) -> None:
 def dump_ai_error(prompt: str, response: str, error_msg: str) -> None:
     try:
         with open("ai_error_log.txt", "a", encoding="utf-8") as f:
-            f.write(f"=== ОШИБКА ИИ ===\n")
+            f.write("=== НЕУДАЧНАЯ ПОПЫТКА ИИ ===\n")
+            f.write("СТАТУС: промежуточная; может быть исправлена повтором\n")
             f.write(f"ПРИЧИНА: {error_msg}\n")
             f.write(f"--- ЗАПРОС ---\n{prompt}\n")
             f.write(f"--- ОТВЕТ ---\n{response}\n")
@@ -59,12 +66,32 @@ def build_translation_prompt(
     mode: str,
     context: str,
     prompt_type: str = "mods",
+    force_translation: bool = False,
 ) -> str:
     blob = json.dumps(payload, ensure_ascii=False)
     prompts = load_prompts()
     intro_template = prompts.get(prompt_type, get_default_prompts()["mods"])
     intro = intro_template.replace("{lang_name}", lang_name).replace("{context}", context)
+    if prompt_type == "books" and lang_name.casefold() in {"russian", "русский"}:
+        intro += (
+            "\nPreferred Minecraft terminology for Russian:\n"
+            "- Copy Paste Gadget = Гаджет копирования и вставки\n"
+            "- Cut Paste Gadget = Гаджет вырезания и вставки\n"
+            "- Potion Charm = Амулет зелья\n"
+            "- Gem Case = Футляр для самоцветов"
+        )
+    if force_translation:
+        intro += (
+            "\nEvery value below was selected because it requires translation. "
+            "Do not copy ordinary source text unchanged; translate names and titles "
+            f"naturally into {lang_name}. Preserve only protected placeholders and "
+            "genuine non-translatable terms."
+        )
     tech_rules = prompts.get("technical", get_default_prompts()["technical"])
+    tech_rules += (
+        "\nEach JSON key is an independent source row. Never combine text from "
+        "different keys and never copy one key's translation into another key."
+    )
 
     # --- ЯВНЫЙ СПИСОК МАРКЕРОВ: что именно нельзя менять ---
     from mineai.text_processing import PLACEHOLDER_PATTERN
@@ -149,10 +176,36 @@ def parse_llm_json_response(content: str) -> dict[str, object]:
     return data
 
 def placeholders_match(text: str, expected_text: str) -> bool:
-    """Return whether all placeholders are preserved with equal multiplicity."""
-    expected_ids = Counter(PLACEHOLDER_PATTERN.findall(expected_text))
-    actual_ids = Counter(PLACEHOLDER_PATTERN.findall(text))
+    """Return whether placeholders are preserved with exact ids, counts and order."""
+    expected_ids = PLACEHOLDER_PATTERN.findall(expected_text)
+    actual_ids = PLACEHOLDER_PATTERN.findall(text)
     return actual_ids == expected_ids
+
+
+def _suspicious_duplicate_keys(
+    keys: list[str],
+    translated: dict[str, object],
+    items: dict[str, EngineItem],
+) -> set[str]:
+    return suspicious_duplicate_keys(
+        {key: items[key].masked for key in keys},
+        {key: translated.get(key) for key in keys},
+    )
+
+
+def _is_untranslated_candidate(
+    item: EngineItem,
+    candidate: str,
+    target_lang: dict,
+) -> bool:
+    if target_lang.get("api") == "en":
+        return False
+    if candidate.strip() != item.masked.strip():
+        return False
+    if is_technical_term(item.original):
+        return False
+    visible_source = PLACEHOLDER_PATTERN.sub("", item.masked)
+    return bool(re.search(r"[A-Za-z]", visible_source))
 
 
 def repair_markers(
@@ -189,9 +242,19 @@ def repair_markers(
             return None
         except (json.JSONDecodeError, ValueError):
             pass
-    if raw and placeholders_match(raw, masked_source):
+    repaired_text = _text_without_numbered_markers(raw)
+    source_text = _text_without_numbered_markers(masked_source)
+    broken_text = _text_without_numbered_markers(broken_translation)
+    reverted_to_source = repaired_text == source_text and broken_text != source_text
+    if raw and placeholders_match(raw, masked_source) and not reverted_to_source:
         return raw
     return None
+
+
+def _text_without_numbered_markers(text: str) -> str:
+    text = PLACEHOLDER_PATTERN.sub("", text)
+    text = re.sub(r"(?<!\[)#\s*\d+\s*#(?!\])", "", text)
+    return re.sub(r"\s+", " ", text).strip()
 
 def build_marker_manifest(payload: dict[str, str]) -> str:
     """Явный чек-лист маркеров для каждого ключа запроса.
@@ -210,7 +273,8 @@ def build_marker_manifest(payload: dict[str, str]) -> str:
     return (
         "MARKER WHITELIST (exact markers allowed per key):\n"
         + "\n".join(lines)
-        + "\nRULE: the translation of each key must contain exactly the markers from its list — "
+        + "\nRULE: the translation of each key must contain exactly the markers from its list "
+        "in the same order — "
         "no others (if the list ends at [#11#], writing [#12#] is an error), "
         "no skips, no renumbering, no repeats (x2 means exactly two copies)."
     )
@@ -256,6 +320,22 @@ def _fix_marker_typos(raw: str, masked_source: str) -> str:
     orig_markers = PLACEHOLDER_PATTERN.findall(masked_source)
     if not orig_markers:
         return raw
+
+    expected_ids = set(orig_markers)
+
+    def restore_bare_marker(match: re.Match) -> str:
+        marker_id = match.group(1)
+        before = match.string[:match.start()].rstrip()
+        after = match.string[match.end():].lstrip()
+        if before.endswith("[") and after.startswith("]"):
+            return match.group(0)
+        return f"[#{marker_id}#]" if marker_id in expected_ids else match.group(0)
+
+    raw = re.sub(
+        r"(?<!\[)#\s*(\d+)\s*#(?!\])",
+        restore_bare_marker,
+        raw,
+    )
     
     # Ищет сломанные маркеры: [#4%], [%4#], [4#], [№4№], 【#4】 и т.д.
     pattern = r'[\[【]\s*[#%№]+\s*(\d+)\s*[#%№]*\s*[\]】]|[\[【]\s*[#%№]*\s*(\d+)\s*[#%№]+\s*[\]】]'
@@ -354,6 +434,7 @@ class BatchLlmEngine(TranslationEngine):
                             target_lang,
                             result,
                             callbacks,
+                            force_translation=True,
                         )
                     )
                 failed = retry_failed
@@ -376,6 +457,8 @@ class BatchLlmEngine(TranslationEngine):
         target_lang: dict,
         result: dict[str, str],
         callbacks: EngineCallbacks,
+        *,
+        force_translation: bool = False,
     ) -> list[str]:
         PLACEHOLDER_THRESHOLD = 20
         CHUNK_SIZE = 3
@@ -470,7 +553,10 @@ class BatchLlmEngine(TranslationEngine):
             if success and len(translated_parts) == len(sub_chunks):
                 combined_masked = "".join(translated_parts)
                 text = unmask_translation(combined_masked, item.mapping)
-                result[key] = polish_translation(text)
+                result[key] = polish_translation(
+                    text,
+                    boundary_source=item.original,
+                )
             else:
                 all_failed.append(key)
         # === КОНЕЦ ОБРАБОТКИ СЛОЖНЫХ СТРОК ===
@@ -484,6 +570,7 @@ class BatchLlmEngine(TranslationEngine):
                 mode=self.mode,
                 context=self.context,
                 prompt_type=self.prompt_type,
+                force_translation=force_translation,
             )
             callbacks.on_status(f"⏳ {self.label}: пакет {len(normal_keys)}...")
             try:
@@ -491,6 +578,9 @@ class BatchLlmEngine(TranslationEngine):
                 if not content:
                     return all_failed + normal_keys
                 translated = parse_llm_json_response(content)
+                suspicious_duplicates = _suspicious_duplicate_keys(
+                    normal_keys, translated, items
+                )
                 unexpected = set(translated) - set(normal_keys)
                 if unexpected:
                     callbacks.on_log(
@@ -503,13 +593,40 @@ class BatchLlmEngine(TranslationEngine):
                         all_failed.append(key)
                         dump_ai_error(items[key].masked, str(raw), "Ключ утерян или значение не текст")
                         continue
-                    orig_len = len(items[key].masked)
-                    if len(raw) > (orig_len * 2.5) + 50:
+                    if key in suspicious_duplicates:
                         all_failed.append(key)
-                        dump_ai_error(items[key].masked, raw, f"Слишком длинный текст ({len(raw)} при оригинале {orig_len})")
+                        dump_ai_error(
+                            items[key].masked,
+                            raw,
+                            "Одинаковый длинный ответ для разных строк пакета",
+                        )
+                        continue
+                    length_issue = translation_length_issue(items[key].masked, raw)
+                    if length_issue:
+                        all_failed.append(key)
+                        dump_ai_error(items[key].masked, raw, length_issue)
                         continue
                     raw = _fix_marker_typos(raw, items[key].masked)
-                    
+                    raw = collapse_added_line_breaks(items[key].masked, raw)
+
+                    if count_line_breaks(raw) != count_line_breaks(
+                        items[key].masked
+                    ):
+                        all_failed.append(key)
+                        continue
+
+                    if has_untranslated_leading_article(
+                        items[key].masked,
+                        raw,
+                        target_lang,
+                    ):
+                        all_failed.append(key)
+                        continue
+
+                    if _is_untranslated_candidate(items[key], raw, target_lang):
+                        all_failed.append(key)
+                        continue
+
                     if not placeholders_match(raw, items[key].masked):
                         fixed = repair_markers(
                             self._call_api, items[key].masked, raw, self.max_tokens
@@ -520,7 +637,10 @@ class BatchLlmEngine(TranslationEngine):
                             continue
                         raw = fixed
                     text = unmask_translation(raw, items[key].mapping)
-                    result[key] = polish_translation(text)
+                    result[key] = polish_translation(
+                        text,
+                        boundary_source=items[key].original,
+                    )
                 if len(all_failed) > len(complex_keys):
                     callbacks.on_log(
                         f"❌ {self.label}: не прошли проверку — {len(all_failed) - len(complex_keys)} строк",

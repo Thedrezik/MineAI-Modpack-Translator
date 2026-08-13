@@ -1,4 +1,4 @@
-"""Experimental PyQt6 presentation layer for MineAI Translator.
+﻿"""Experimental PyQt6 presentation layer for MineAI Translator.
 
 Imports stay lazy so the existing CustomTkinter application and unit tests do
 not require the optional Qt dependency unless this UI is explicitly launched.

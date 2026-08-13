@@ -1,9 +1,17 @@
-import json
+﻿import json
 import os
 import re
 import zipfile
 
-from mineai.constants import BOOK_PATH_MARKERS, MD_PATH_MARKERS, RESEARCH_PATH_MARKERS
+from formatkit import (
+    FormatRegistry,
+    FormatValidationError,
+    relocated_dependencies,
+)
+from formatkit.adapters.modonomicon import (
+    build_localized_overlay,
+    is_modonomicon_path,
+)
 from mineai.engines.base import EngineCallbacks
 from mineai.engines.service import TranslationService
 from mineai.json_utils import (
@@ -14,6 +22,13 @@ from mineai.json_utils import (
 )
 from mineai.mod_names import get_mod_name
 from mineai.output.pack_writer import PackWriter
+from mineai.processors.book_paths import (
+    MarkdownBookLocator,
+    legacy_lang_target_path,
+    localized_json_target_path,
+    minecraft_lang_json_target_path,
+)
+from mineai.language_validation import translation_needs_repair
 from mineai.processors.locale_keys import (
     collect_lang_keys_to_translate,
     count_translatable_lang_entries,
@@ -21,11 +36,14 @@ from mineai.processors.locale_keys import (
 from mineai.processors.selection import (
     build_book_json_output,
     collect_book_json_selection,
-    collect_book_markdown_selection,
     skip_threshold_reached,
 )
 from mineai.runtime.state import JobState
-from mineai.text_processing import is_technical_term, looks_like_source_language
+from mineai.text_processing import (
+    is_article_removed_technical_translation,
+    is_technical_term,
+    looks_like_source_language,
+)
 
 
 class JarProcessor:
@@ -34,10 +52,11 @@ class JarProcessor:
         service: TranslationService,
         state: JobState,
         callbacks: EngineCallbacks,
-    ) -> None:
+    ) -> str | None:
         self.service = service
         self.state = state
         self.callbacks = callbacks
+        self.format_registry = FormatRegistry.default()
 
     def process(
         self,
@@ -49,6 +68,7 @@ class JarProcessor:
         translate_mods: bool,
         translate_books: bool,
         pack_writer: PackWriter | None,
+        book_locator: MarkdownBookLocator | None = None,
     ) -> None:
         if not translate_mods and not translate_books:
             return
@@ -60,6 +80,7 @@ class JarProcessor:
 
         try:
             with zipfile.ZipFile(jar_path, "r") as zin:
+                archive_items = zin.infolist()
                 zout = (
                     zipfile.ZipFile(
                         temp_path,
@@ -72,13 +93,40 @@ class JarProcessor:
                 written_inplace: set[str] = set()
                 locale_files = {
                     item.filename.lower(): item
-                    for item in zin.infolist()
-                    if target_file in item.filename.lower()
-                    or f"/{target_lang['file']}/" in item.filename.lower()
+                    for item in archive_items
                 }
+                book_locator = book_locator or MarkdownBookLocator(
+                    [item.filename for item in archive_items],
+                    target_lang["file"],
+                )
+                companion_documents = []
+                if translate_books:
+                    for document_item in archive_items:
+                        if not is_modonomicon_path(document_item.filename):
+                            continue
+                        try:
+                            document_text = zin.read(document_item).decode(
+                                "utf-8-sig",
+                                errors="ignore",
+                            )
+                        except OSError:
+                            continue
+                        companion_documents.append(
+                            (document_item.filename, document_text)
+                        )
+                companion_lang_keys = self.format_registry.companion_lang_keys(
+                    companion_documents
+                )
+                companion_lang_prefixes = (
+                    self.format_registry.companion_lang_prefixes(
+                        [item.filename for item in archive_items]
+                    )
+                    if translate_books
+                    else ()
+                )
 
                 try:
-                    for item in zin.infolist():
+                    for item in archive_items:
                         if not self.state.should_run():
                             break
                         self.state.wait_if_paused()
@@ -90,25 +138,60 @@ class JarProcessor:
                             if (
                                 target_file not in fl
                                 and f"/{target_lang['file']}/" not in fl
+                                and f"/_{target_lang['file']}/" not in fl
+                                and not fl.endswith(
+                                    f"/{target_lang['file']}.lang"
+                                )
                             ):
                                 zout.writestr(item, zin.read(item))
 
-                        is_book_json = (
-                            fl.endswith(".json")
-                            and "/en_us/" in fl
-                            and (
-                                any(m in fl for m in BOOK_PATH_MARKERS)
-                                or any(m in fl for m in RESEARCH_PATH_MARKERS)
+                        is_book_json = localized_json_target_path(
+                            item.filename,
+                            target_lang["file"],
+                        ) is not None
+                        markdown_target = book_locator.target_path(item.filename)
+                        is_book_md = markdown_target is not None
+                        is_modonomicon = is_modonomicon_path(item.filename)
+                        upstream_adapter_id = (
+                            self.format_registry.upstream_adapter_id(
+                                item.filename
                             )
                         )
-                        is_book_md = (
-                            (fl.endswith(".md") or fl.endswith(".txt"))
-                            and "/en_us/" in fl
-                            and any(m in fl for m in MD_PATH_MARKERS)
+                        upstream_target = (
+                            self.format_registry.upstream_target_path(
+                                item.filename,
+                                target_lang["file"],
+                            )
                         )
-                        is_lang = fl.endswith("en_us.json") and not is_book_json
+                        legacy_lang_target = legacy_lang_target_path(
+                            item.filename,
+                            target_lang["file"],
+                        )
+                        is_lang = (
+                            minecraft_lang_json_target_path(
+                                item.filename,
+                                target_lang["file"],
+                            ) is not None
+                            and not is_book_json
+                        )
 
-                        if translate_mods and is_lang:
+                        if translate_mods and legacy_lang_target:
+                            modified |= self._process_book_md(
+                                zin,
+                                zout,
+                                item,
+                                locale_files,
+                                target_lang,
+                                mode,
+                                output_mode,
+                                pack_writer,
+                                mod_name,
+                                written_inplace,
+                                legacy_lang_target,
+                                prompt_type="mods",
+                                content_label="Интерфейс LANG",
+                            )
+                        elif translate_mods and is_lang:
                             modified |= self._process_lang_entry(
                                 zin,
                                 zout,
@@ -121,6 +204,88 @@ class JarProcessor:
                                 pack_writer,
                                 mod_name,
                                 written_inplace,
+                            )
+                        elif (
+                            companion_lang_prefixes or companion_lang_keys
+                        ) and is_lang:
+                            modified |= self._process_book_lang_metadata(
+                                zin,
+                                zout,
+                                item,
+                                locale_files,
+                                target_file,
+                                target_lang,
+                                mode,
+                                output_mode,
+                                pack_writer,
+                                mod_name,
+                            written_inplace,
+                            companion_lang_prefixes,
+                            companion_lang_keys,
+                        )
+                        elif translate_books and is_modonomicon:
+                            modified |= self._process_book_md(
+                                zin,
+                                zout,
+                                item,
+                                locale_files,
+                                target_lang,
+                                mode,
+                                output_mode,
+                                pack_writer,
+                                mod_name,
+                                written_inplace,
+                                item.filename,
+                                content_label="Книга Modonomicon",
+                                copy_when_empty=False,
+                            )
+                        elif (
+                            translate_books
+                            and upstream_adapter_id == "patchouli-book-json"
+                            and upstream_target
+                            and self._formatkit_ready(
+                                zin,
+                                item,
+                                target_lang,
+                                upstream_target,
+                            )
+                        ):
+                            modified |= self._process_book_md(
+                                zin,
+                                zout,
+                                item,
+                                locale_files,
+                                target_lang,
+                                mode,
+                                output_mode,
+                                pack_writer,
+                                mod_name,
+                                written_inplace,
+                                upstream_target,
+                                content_label="Книга Patchouli",
+                            )
+                        elif (
+                            translate_books
+                            and upstream_adapter_id
+                            in {
+                                "oracle-index-mdx",
+                                "oracle-index-meta-json",
+                            }
+                            and upstream_target
+                        ):
+                            modified |= self._process_book_md(
+                                zin,
+                                zout,
+                                item,
+                                locale_files,
+                                target_lang,
+                                mode,
+                                output_mode,
+                                pack_writer,
+                                mod_name,
+                                written_inplace,
+                                upstream_target,
+                                content_label="Книга Oracle Index",
                             )
                         elif translate_books and is_book_json:
                             modified |= self._process_book_json(
@@ -147,14 +312,19 @@ class JarProcessor:
                                 pack_writer,
                                 mod_name,
                                 written_inplace,
+                                markdown_target,
                             )
 
                     if output_mode == "inplace" and zout:
-                        for item in zin.infolist():
+                        for item in archive_items:
                             fl = item.filename.lower()
                             is_target = (
                                 target_file in fl
                                 or f"/{target_lang['file']}/" in fl
+                                or f"/_{target_lang['file']}/" in fl
+                                or fl.endswith(
+                                    f"/{target_lang['file']}.lang"
+                                )
                             )
                             if is_target and item.filename not in written_inplace:
                                 zout.writestr(item, zin.read(item))
@@ -167,6 +337,7 @@ class JarProcessor:
                 original_mode = os.stat(jar_path).st_mode
                 os.chmod(temp_path, original_mode)
                 os.replace(temp_path, jar_path)
+                return jar_path
 
         finally:
             if os.path.exists(temp_path):
@@ -174,6 +345,7 @@ class JarProcessor:
                     os.remove(temp_path)
                 except OSError:
                     pass
+        return None
 
     @staticmethod
     def _validate_inplace_archive(path: str) -> None:
@@ -185,6 +357,54 @@ class JarProcessor:
                 )
 
     def _process_lang_entry(
+        self, zin, zout, item, locale_files, target_file, target_lang, mode,
+        output_mode, pack_writer, mod_name, written_inplace,
+    ) -> bool:
+        tr_path = minecraft_lang_json_target_path(
+            item.filename,
+            target_lang["file"],
+        )
+        if tr_path is None:
+            return False
+        try:
+            source_text = zin.read(item).decode("utf-8-sig", errors="ignore")
+            self.format_registry.plan(
+                item.filename,
+                source_text,
+                target_lang["file"],
+                target_path_hint=tr_path,
+            )
+        except (OSError, ValueError, FormatValidationError):
+            return self._process_lang_entry_legacy(
+                zin,
+                zout,
+                item,
+                locale_files,
+                target_file,
+                target_lang,
+                mode,
+                output_mode,
+                pack_writer,
+                mod_name,
+                written_inplace,
+            )
+        return self._process_book_md(
+            zin,
+            zout,
+            item,
+            locale_files,
+            target_lang,
+            mode,
+            output_mode,
+            pack_writer,
+            mod_name,
+            written_inplace,
+            tr_path,
+            prompt_type="mods",
+            content_label="Интерфейс JSON",
+        )
+
+    def _process_lang_entry_legacy(
         self, zin, zout, item, locale_files, target_file, target_lang, mode,
         output_mode, pack_writer, mod_name, written_inplace,
     ) -> bool:
@@ -216,7 +436,6 @@ class JarProcessor:
         total_translatable = count_translatable_lang_entries(en_data)
         if total_translatable == 0:
             return False
-
         if mode == "skip" and skip_threshold_reached(
             total_translatable,
             len(pending),
@@ -237,21 +456,20 @@ class JarProcessor:
         for key, value in tr_data.items():
             if key in merged and isinstance(merged[key], str) and value:
                 merged[key] = value
-
         if pending:
             self.callbacks.on_log(
-                f"⚡ Перевод {mod_name} [Интерфейс] — {len(pending)} строк",
+                f"⚡ Перевод {mod_name} [Интерфейс fallback] — "
+                f"{len(pending)} строк",
                 "cyan",
             )
-            translated = self.service.translate_dict(
-                pending,
-                target_lang,
-                self.callbacks,
-                context=mod_name,
+            merged.update(
+                self.service.translate_dict(
+                    pending,
+                    target_lang,
+                    self.callbacks,
+                    context=mod_name,
+                )
             )
-            for key, value in translated.items():
-                merged[key] = value
-
         return self._write_lang_output(
             merged,
             tr_path,
@@ -262,6 +480,28 @@ class JarProcessor:
             item,
             en_data,
         )
+
+    def _formatkit_ready(
+        self,
+        archive,
+        item,
+        target_lang,
+        target_path,
+    ) -> bool:
+        try:
+            source_text = archive.read(item).decode(
+                "utf-8-sig",
+                errors="ignore",
+            )
+            self.format_registry.plan(
+                item.filename,
+                source_text,
+                target_lang["file"],
+                target_path_hint=target_path,
+            )
+        except (OSError, ValueError, FormatValidationError):
+            return False
+        return True
 
     def _write_lang_output(self, data, tr_path, output_mode, pack_writer, zout, written_inplace, item, en_data) -> bool:
         payload = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
@@ -310,6 +550,7 @@ class JarProcessor:
             en_data,
             tr_data,
             mode,
+            target_lang,
         )
         total_translatable = len(source_map)
         if total_translatable == 0:
@@ -337,11 +578,17 @@ class JarProcessor:
                 f"⚡ Перевод {mod_name} [Книга JSON] — {len(pending)} строк",
                 "magenta",
             )
-            translated = self.service.translate_dict(
+            translate_book = getattr(
+                self.service,
+                "translate_formatted_dict",
+                self.service.translate_dict,
+            )
+            translated = translate_book(
                 pending,
                 target_lang,
                 self.callbacks,
-                context=mod_name,
+                context=f"{mod_name} | {item.filename}",
+                prompt_type="books",
             )
 
         output_data = build_book_json_output(en_data, preserved, translated)
@@ -361,24 +608,23 @@ class JarProcessor:
 
     def _process_book_md(
         self, zin, zout, item, locale_files, target_lang, mode,
-        output_mode, pack_writer, mod_name, written_inplace,
+        output_mode, pack_writer, mod_name, written_inplace, target_path,
+        *, prompt_type="books", content_label="Книга MD",
+        copy_when_empty=True,
     ) -> bool:
-        fl = item.filename.lower()
-        tr_path = (
-            re.sub(
-                r"/en_us/",
-                f"/{target_lang['file']}/",
-                item.filename,
-                flags=re.IGNORECASE,
-            )
-            if "/en_us/" in fl
-            else item.filename
-        )
-        tr_key = tr_path.lower()
         try:
             en_text = zin.read(item).decode("utf-8-sig", errors="ignore")
         except OSError:
             return False
+
+        plan = self.format_registry.plan(
+            item.filename,
+            en_text,
+            target_lang["file"],
+            target_path_hint=target_path,
+        )
+        tr_path = plan.target_path or target_path
+        tr_key = tr_path.lower()
 
         tr_text = ""
         if mode != "force" and tr_key in locale_files:
@@ -390,17 +636,8 @@ class JarProcessor:
             except OSError:
                 tr_text = ""
 
-        selection = collect_book_markdown_selection(
-            en_text,
-            tr_text,
-            mode,
-            smart_glue=self.service.config.getboolean(
-                "GENERAL",
-                "smart_glue",
-            ),
-        )
-        if selection.total_translatable == 0:
-            if tr_key in locale_files and mode != "force":
+        if not plan.units:
+            if copy_when_empty and tr_key in locale_files and mode != "force":
                 return self._copy_existing(
                     zin,
                     locale_files,
@@ -414,49 +651,299 @@ class JarProcessor:
                 )
             return False
 
-        if mode == "skip" and skip_threshold_reached(
-            selection.total_translatable,
-            len(selection.pending),
-        ):
-            return self._copy_existing(
-                zin,
-                locale_files,
-                tr_key,
+        active_plan = plan
+        pending_ids = {unit.id for unit in plan.units}
+        if tr_text and mode != "force":
+            merged = self._merge_existing_formatkit_plan(
+                plan,
                 tr_path,
-                output_mode,
-                pack_writer,
-                {},
-                {},
-                mode,
+                tr_text,
+                target_lang,
             )
+            if merged is None:
+                self.callbacks.on_log(
+                    f"⚠️ {mod_name}: существующий перевод {tr_path} "
+                    "от другой структуры страницы; он проигнорирован",
+                    "yellow",
+                )
+            else:
+                active_plan, pending_ids = merged
 
-        if selection.pending:
+        pending = {
+            unit.id: unit.payload
+            for unit in active_plan.units
+            if mode == "force" or unit.id in pending_ids
+        }
+        if mode == "skip" and skip_threshold_reached(
+            len(plan.units),
+            len(pending),
+        ):
+            pending = {}
+
+        translated: dict[str, str] = {}
+        cache_contexts = {
+            unit_id: f"{plan.adapter_id}|{item.filename}|{unit_id}"
+            for unit_id in pending
+        }
+        candidate_validators = {
+            unit_id: (
+                lambda candidate, current_id=unit_id: self._formatkit_reason(
+                    active_plan,
+                    current_id,
+                    candidate,
+                    target_lang,
+                )
+            )
+            for unit_id in pending
+        }
+        if pending:
             self.callbacks.on_log(
-                f"⚡ Перевод {mod_name} [Книга MD] — "
-                f"{len(selection.pending)} строк",
+                f"⚡ Перевод {mod_name} [{content_label}] — "
+                f"{len(pending)} смысловых блоков",
                 "magenta",
             )
             translated = self.service.translate_dict(
-                selection.pending,
+                pending,
                 target_lang,
                 self.callbacks,
-                context=mod_name,
+                context=(
+                    f"{mod_name} | {plan.adapter_id} | {item.filename}"
+                ),
+                prompt_type=prompt_type,
+                cache_contexts=cache_contexts,
+                candidate_validators=candidate_validators,
             )
-            for index_text, value in translated.items():
-                index = int(index_text)
-                if index_text in selection.title_meta:
-                    prefix, suffix = selection.title_meta[index_text]
-                    selection.lines_out[index] = prefix + value + suffix
-                else:
-                    selection.lines_out[index] = value
 
-        payload = "\n".join(selection.lines_out).encode("utf-8")
+        result, rejected = active_plan.apply_resilient(translated)
+        output_text = result.text
+        if rejected:
+            units_by_id = {unit.id: unit for unit in active_plan.units}
+            discard = getattr(
+                self.service,
+                "discard_cached_translation",
+                None,
+            )
+            for unit_id, reason in rejected.items():
+                if callable(discard):
+                    discard(
+                        target_lang["api"],
+                        units_by_id[unit_id].payload,
+                        cache_contexts.get(unit_id, ""),
+                    )
+                self.callbacks.on_log(
+                    f"⚠️ {mod_name}: блок {unit_id} восстановлен из "
+                    f"оригинала: {reason}",
+                    "yellow",
+                )
+
         if output_mode == "resourcepack" and pack_writer:
+            if is_modonomicon_path(item.filename):
+                localized = build_localized_overlay(
+                    item.filename,
+                    en_text,
+                    output_text,
+                    target_lang["file"],
+                )
+                output_text = localized.data_text
+                pack_writer.write(
+                    localized.source_lang_path,
+                    json.dumps(
+                        localized.source_entries,
+                        ensure_ascii=False,
+                        indent=2,
+                    ).encode("utf-8"),
+                )
+                pack_writer.write(
+                    localized.target_lang_path,
+                    json.dumps(
+                        localized.target_entries,
+                        ensure_ascii=False,
+                        indent=2,
+                    ).encode("utf-8"),
+                )
+            payload = output_text.encode("utf-8")
             pack_writer.write(tr_path, payload)
+            self._copy_relocated_dependencies(
+                zin,
+                item.filename,
+                tr_path,
+                output_text,
+                locale_files,
+                output_mode,
+                pack_writer,
+                zout,
+                written_inplace,
+            )
             return True
         if zout:
+            payload = output_text.encode("utf-8")
             zout.writestr(tr_path, payload)
             written_inplace.add(tr_path)
+            self._copy_relocated_dependencies(
+                zin,
+                item.filename,
+                tr_path,
+                output_text,
+                locale_files,
+                output_mode,
+                pack_writer,
+                zout,
+                written_inplace,
+            )
             return True
         return False
+
+    @staticmethod
+    def _copy_relocated_dependencies(
+        zin,
+        source_path,
+        target_path,
+        text,
+        archive_items,
+        output_mode,
+        pack_writer,
+        zout,
+        written_inplace,
+    ) -> None:
+        for dependency_source, dependency_target in relocated_dependencies(
+            source_path,
+            target_path,
+            text,
+            (item.filename for item in archive_items.values()),
+        ):
+            target_key = dependency_target.casefold()
+            if target_key in archive_items:
+                continue
+            source_item = archive_items.get(dependency_source.casefold())
+            if source_item is None:
+                continue
+            payload = zin.read(source_item)
+            if output_mode == "resourcepack" and pack_writer:
+                pack_writer.write(dependency_target, payload)
+            elif zout and dependency_target not in written_inplace:
+                zout.writestr(dependency_target, payload)
+                written_inplace.add(dependency_target)
+
+    def _process_book_lang_metadata(
+        self, zin, zout, item, locale_files, target_file, target_lang, mode,
+        output_mode, pack_writer, mod_name, written_inplace, prefixes,
+        exact_keys=frozenset(),
+    ) -> bool:
+        tr_path = re.sub(
+            r"en_us\.json$",
+            target_file,
+            item.filename,
+            flags=re.IGNORECASE,
+        )
+        tr_key = tr_path.lower()
+        try:
+            en_data = load_lenient_json(zin.read(item))
+        except (json.JSONDecodeError, OSError):
+            return False
+
+        source = {
+            key: value
+            for key, value in en_data.items()
+            if isinstance(key, str)
+            and isinstance(value, str)
+            and (key.startswith(prefixes) or key in exact_keys)
+        }
+        if not source:
+            return False
+
+        existing = {}
+        if tr_key in locale_files:
+            try:
+                existing = load_lenient_json(zin.read(locale_files[tr_key]))
+            except (json.JSONDecodeError, OSError):
+                existing = {}
+        existing_for_source = {
+            key: value for key, value in existing.items() if key in source
+        }
+        pending = collect_lang_keys_to_translate(
+            source,
+            existing_for_source,
+            mode,
+            target_lang["regex"],
+        )
+        merged = dict(existing)
+        for key, value in existing_for_source.items():
+            if value:
+                merged[key] = value
+        if pending:
+            self.callbacks.on_log(
+                f"⚡ Перевод {mod_name} [Метаданные книги] — "
+                f"{len(pending)} строк",
+                "magenta",
+            )
+            merged.update(
+                self.service.translate_dict(
+                    pending,
+                    target_lang,
+                    self.callbacks,
+                    context=f"{mod_name} | manual metadata",
+                    prompt_type="books",
+                )
+            )
+        if not merged:
+            return False
+        return self._write_lang_output(
+            merged,
+            tr_path,
+            output_mode,
+            pack_writer,
+            zout,
+            written_inplace,
+            item,
+            source,
+        )
+
+    @staticmethod
+    def _formatkit_reason(
+        plan,
+        unit_id: str,
+        candidate: str,
+        target_lang: dict,
+    ) -> str | None:
+        def validate_visible(source: str, translated: str) -> str | None:
+            if not re.search(r"[A-Za-z]", source):
+                return None
+            if is_technical_term(source.strip()):
+                return None
+            if is_article_removed_technical_translation(
+                source,
+                translated,
+                target_lang.get("api", ""),
+            ):
+                return None
+            if translation_needs_repair(source, translated, target_lang):
+                return f"Visible text segment was not fully translated: {source!r}"
+            return None
+
+        reason = plan.candidate_error(unit_id, candidate, validate_visible)
+        return f"FormatKit: {reason}" if reason else None
+
+    def _merge_existing_formatkit_plan(
+        self,
+        source_plan,
+        target_path: str,
+        target_text: str,
+        target_lang: dict,
+    ):
+        try:
+            target_plan = self.format_registry.plan(
+                target_path,
+                target_text,
+                target_lang["file"],
+                target_path_hint=target_path,
+            )
+        except ValueError:
+            return None
+        try:
+            return source_plan.merge_existing(
+                target_plan,
+                target_lang["regex"],
+            )
+        except FormatValidationError:
+            return None
 

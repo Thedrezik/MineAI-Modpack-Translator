@@ -1,4 +1,4 @@
-import unittest
+﻿import unittest
 
 from mineai.config import ConfigManager
 from mineai.gui_qt.i18n import translator, t
@@ -27,6 +27,13 @@ class QtUxHardeningTests(unittest.TestCase):
     def test_config_has_persisted_ui_language_default(self):
         self.assertEqual(ConfigManager._DEFAULTS["GENERAL"]["ui_language"], "ru")
         self.assertEqual(ConfigManager._DEFAULTS["GENERAL"]["theme"], "Dark")
+        self.assertEqual(ConfigManager._DEFAULTS["GENERAL"].get("minecraft_version"), "1.20.1")
+        self.assertEqual(ConfigManager._DEFAULTS["GENERAL"].get("target_language"), "Русский")
+        self.assertEqual(ConfigManager._DEFAULTS["GENERAL"].get("translation_engine"), "Google")
+        self.assertEqual(
+            ConfigManager._DEFAULTS["GENERAL"].get("cache_recovery_mode"),
+            "False",
+        )
 
     def test_interface_dictionary_switches_between_ru_and_en(self):
         self.assertEqual(t("button.analysis"), "Анализ")
@@ -43,12 +50,14 @@ class QtUxHardeningTests(unittest.TestCase):
         self.assertIn("макс. 40", t("field.ai_batch_limit"))
         self.assertIn("15 строк или меньше", t("tooltip.ai_batch"))
         self.assertIn("90%", t("tooltip.mode_skip"))
+        self.assertIn("AI-кэш", t("mode.cache_recovery"))
 
         translator.set_language("en")
         self.assertEqual(t("mode.append"), "Append")
         self.assertEqual(t("output.resourcepack"), "Resource Pack")
         self.assertIn("max. 40", t("field.ai_batch_limit"))
         self.assertIn("15 lines or fewer", t("tooltip.ai_batch"))
+        self.assertIn("AI cache", t("mode.cache_recovery"))
 
     def test_engine_readiness_uses_current_interface_language(self):
         config = _ConfigStub()
@@ -65,6 +74,26 @@ class QtUxHardeningTests(unittest.TestCase):
         self.assertIn("QPushButton#PrimaryButton { background-color: #7652D6", light)
         self.assertIn("QToolButton#HelpMarker", dark)
         self.assertIn("QPlainTextEdit#LogView", light)
+
+    def test_analysis_selection_has_explicit_dark_and_light_styling(self):
+        dark = theme_qss("Dark")
+        light = theme_qss("Light")
+
+        self.assertIn("QTreeWidget#TranslationSelectionTree", dark)
+        self.assertGreater(
+            light.count("QTreeWidget#TranslationSelectionTree"),
+            dark.count("QTreeWidget#TranslationSelectionTree"),
+        )
+
+    def test_selection_dialog_distinguishes_hover_from_checked_state(self):
+        dark = theme_qss("Dark")
+        light = theme_qss("Light")
+
+        for stylesheet in (dark, light):
+            self.assertIn("QTreeWidget#TranslationSelectionTree::item:hover", stylesheet)
+            self.assertIn("QTreeWidget#TranslationSelectionTree::indicator:checked", stylesheet)
+        self.assertIn("#20C7B7", dark)
+        self.assertIn("#0F9F92", light)
 
     def test_semantic_filters_do_not_treat_all_yellow_lines_as_errors(self):
         progress = entry_from_message("yellow", "📦 Чтение ресурс-пака pack.zip...", "#fff")

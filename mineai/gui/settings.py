@@ -1,4 +1,4 @@
-import ctypes
+﻿import ctypes
 import sys
 
 import customtkinter as ctk

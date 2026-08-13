@@ -1,4 +1,4 @@
-"""Keep legacy test fixtures compatible with the current language schema.
+﻿"""Keep legacy test fixtures compatible with the current language schema.
 
 The production language definitions include a ``regex`` field. The older
 ``test_llm_common`` fixture predates that field, so importing and extending it

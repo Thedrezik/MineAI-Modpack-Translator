@@ -1,4 +1,4 @@
-import json
+﻿import json
 import os
 import stat
 import tempfile
@@ -43,14 +43,20 @@ def _write_jar(path):
 
 
 class JarInplaceSafetyTests(unittest.TestCase):
-    def test_valid_temp_archive_atomically_replaces_original(self):
+    def test_legacy_target_lang_is_replaced_without_duplicate_zip_entry(self):
         state = JobState(is_running=True)
         logs = []
         with tempfile.TemporaryDirectory() as directory:
-            path = os.path.join(directory, "example.jar")
-            _write_jar(path)
-            os.chmod(path, 0o640)
-            expected_mode = stat.S_IMODE(os.stat(path).st_mode)
+            path = os.path.join(directory, "legacy.jar")
+            with zipfile.ZipFile(path, "w") as archive:
+                archive.writestr(
+                    "assets/example/lang/en_us.lang",
+                    "example.hello=Hello\n",
+                )
+                archive.writestr(
+                    "assets/example/lang/ru_ru.lang",
+                    "example.hello=Старый перевод\n",
+                )
 
             JarProcessor(_Service(), state, _callbacks(logs)).process(
                 path,
@@ -62,6 +68,31 @@ class JarInplaceSafetyTests(unittest.TestCase):
                 pack_writer=None,
             )
 
+            with zipfile.ZipFile(path) as archive:
+                target = "assets/example/lang/ru_ru.lang"
+                self.assertEqual(archive.namelist().count(target), 1)
+                self.assertIn("Привет", archive.read(target).decode("utf-8"))
+
+    def test_valid_temp_archive_atomically_replaces_original(self):
+        state = JobState(is_running=True)
+        logs = []
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "example.jar")
+            _write_jar(path)
+            os.chmod(path, 0o640)
+            expected_mode = stat.S_IMODE(os.stat(path).st_mode)
+
+            written_path = JarProcessor(_Service(), state, _callbacks(logs)).process(
+                path,
+                target_lang=TARGET_LANG,
+                mode="force",
+                output_mode="inplace",
+                translate_mods=True,
+                translate_books=False,
+                pack_writer=None,
+            )
+
+            self.assertEqual(written_path, path)
             with zipfile.ZipFile(path) as archive:
                 self.assertEqual(archive.testzip(), None)
                 self.assertIn("assets/example/lang/ru_ru.json", archive.namelist())

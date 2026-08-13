@@ -1,4 +1,4 @@
-"""Entry point for MineAI Translator (python translator.py)."""
+﻿"""Entry point for MineAI Translator (python translator.py)."""
 
 from mineai.gui_qt import run
 

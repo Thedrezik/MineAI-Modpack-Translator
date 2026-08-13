@@ -1,4 +1,4 @@
-import unittest
+﻿import unittest
 
 from mineai.gui_qt.log_model import split_translation_message
 

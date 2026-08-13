@@ -1,4 +1,4 @@
-"""Shared HTTP retry helpers for translation engines."""
+﻿"""Shared HTTP retry helpers for translation engines."""
 
 from collections.abc import Callable
 import logging

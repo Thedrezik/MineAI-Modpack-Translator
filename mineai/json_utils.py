@@ -1,7 +1,29 @@
-import json
+﻿import json
+import re
 from typing import Any, Iterator
 
 from mineai.constants import KEYS_TO_TRANSLATE
+from mineai.formats.document import DocumentPath
+
+
+_TRANSLATABLE_KEY_TOKEN = re.compile(
+    r"^(?:"
+    r"names?|titles?\d*|texts?\d*|descriptions?|subtexts?|subtitles?|"
+    r"labels?|headers?|headings?|tooltips?|effects?|property|properties|"
+    r"translations?"
+    r")$",
+    re.IGNORECASE,
+)
+
+
+def _is_translatable_json_key(key: object) -> bool:
+    if not isinstance(key, str):
+        return False
+    if key in KEYS_TO_TRANSLATE:
+        return True
+    snake_case = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", key)
+    tokens = re.split(r"[^A-Za-z0-9]+", snake_case)
+    return any(_TRANSLATABLE_KEY_TOKEN.fullmatch(token) for token in tokens)
 
 
 def _strip_json_comments(text: str) -> str:
@@ -104,17 +126,11 @@ def load_lenient_json(raw: bytes | str) -> Any:
 
 
 def path_to_key(path: tuple) -> str:
-    return "/".join(str(p) for p in path)
+    return DocumentPath(path).encode()
 
 
 def key_to_path(key: str) -> tuple:
-    parts: list = []
-    for part in key.split("/"):
-        if part.isdigit():
-            parts.append(int(part))
-        else:
-            parts.append(part)
-    return tuple(parts)
+    return DocumentPath.decode(key).parts
 
 
 def set_at_path(data: Any, path: tuple, value: Any) -> None:
@@ -129,12 +145,18 @@ def iter_translatable_strings(data: Any, path: tuple = ()) -> Iterator[tuple[tup
     if isinstance(data, dict):
         for key, value in data.items():
             child_path = path + (key,)
-            if key in KEYS_TO_TRANSLATE:
+            if _is_translatable_json_key(key) or (
+                key == "pages"
+                and isinstance(value, list)
+                and all(isinstance(item, str) for item in value)
+            ):
                 if isinstance(value, str):
                     yield child_path, value
                 elif isinstance(value, list) and all(isinstance(i, str) for i in value):
                     for idx, item in enumerate(value):
                         yield child_path + (idx,), item
+                elif isinstance(value, (dict, list)):
+                    yield from iter_translatable_strings(value, child_path)
             elif isinstance(value, (dict, list)):
                 yield from iter_translatable_strings(value, child_path)
     elif isinstance(data, list):

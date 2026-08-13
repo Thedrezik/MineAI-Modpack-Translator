@@ -1,4 +1,4 @@
-"""Shared visual tokens and lightweight accessibility helpers for MineAI GUI."""
+﻿"""Shared visual tokens and lightweight accessibility helpers for MineAI GUI."""
 
 from __future__ import annotations
 

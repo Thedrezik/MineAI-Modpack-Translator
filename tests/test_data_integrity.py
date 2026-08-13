@@ -1,9 +1,10 @@
-import json
+﻿import json
 import os
 import tempfile
 import unittest
 
 from mineai.engines.base import EngineCallbacks
+from mineai.json_utils import iter_translatable_strings
 from mineai.runtime.state import JobState
 from mineai.processors.bq_json import BQProcessor
 from mineai.processors.snbt import SnbtProcessor
@@ -88,12 +89,13 @@ class BetterQuestingIntegrityTests(unittest.TestCase):
             path = os.path.join(directory, "Quest.json")
             self._write_quest(path, "Existing English text")
 
-            BQProcessor(service, state, _callbacks(state)).process(
+            written_path = BQProcessor(service, state, _callbacks(state)).process(
                 path,
                 target_lang=TARGET_LANG,
                 mode="force",
             )
 
+            self.assertEqual(written_path, path)
             self.assertEqual(self._quest_name(path), "translated:Existing English text")
 
     def test_cancellation_after_translation_does_not_write_file(self):
@@ -113,6 +115,48 @@ class BetterQuestingIntegrityTests(unittest.TestCase):
 
             with open(path, "rb") as handle:
                 self.assertEqual(handle.read(), original)
+
+
+class LocalizedJsonFieldTests(unittest.TestCase):
+    def test_semantic_book_fields_are_selected_without_framework_rules(self):
+        data = {
+            "effects": ["Single use", "Slotless"],
+            "properties": ["High Durability"],
+            "header": "Vacuum Disenchanting",
+            "crafting.title1": "Energy Cell",
+            "usage.text": "Mandatory component",
+            "spotlightText": "Fuel can be found underground.",
+            "modifier_id": "createastral:amplified",
+            "input": "entity, num",
+        }
+
+        selected = {path: value for path, value in iter_translatable_strings(data)}
+
+        self.assertEqual(
+            set(selected.values()),
+            {
+                "Single use",
+                "Slotless",
+                "High Durability",
+                "Vacuum Disenchanting",
+                "Energy Cell",
+                "Mandatory component",
+                "Fuel can be found underground.",
+            },
+        )
+
+    def test_translatable_container_key_still_recurses_into_child_nodes(self):
+        data = {
+            "text": [
+                {"text": "First paragraph."},
+                {"text": "Second paragraph.", "paragraph": True},
+            ]
+        }
+
+        self.assertEqual(
+            [value for _path, value in iter_translatable_strings(data)],
+            ["First paragraph.", "Second paragraph."],
+        )
 
 
 if __name__ == "__main__":

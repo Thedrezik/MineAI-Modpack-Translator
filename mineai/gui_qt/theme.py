@@ -1,4 +1,4 @@
-"""Dark/Light Modern Dashboard QSS for the Qt interface."""
+﻿"""Dark/Light Modern Dashboard QSS for the Qt interface."""
 
 DARK_QSS = r"""
 QWidget {
@@ -120,6 +120,13 @@ QSlider::groove:horizontal { height: 6px; background: #2A2C3C; border-radius: 3p
 QSlider::sub-page:horizontal { background: #6B46C1; border-radius: 3px; }
 QSlider::handle:horizontal { width: 16px; margin: -5px 0; background: #C7B5F6; border: 2px solid #6B46C1; border-radius: 8px; }
 QPlainTextEdit#LogView, QPlainTextEdit { background-color: #151620; color: #CBD5E1; border: 1px solid #292B3D; border-radius: 8px; padding: 10px; font-family: "Cascadia Mono", "Consolas", monospace; font-size: 11px; selection-background-color: #6B46C1; }
+QTreeWidget#TranslationSelectionTree { background-color: #151620; color: #DCE3EE; border: 1px solid #292B3D; border-radius: 8px; outline: none; alternate-background-color: #191A26; selection-background-color: #243A56; }
+QTreeWidget#TranslationSelectionTree::item { min-height: 30px; padding: 4px 7px; border: 1px solid transparent; }
+QTreeWidget#TranslationSelectionTree::item:hover { background-color: #202B3A; border-color: #3C526B; color: #F8FAFC; }
+QTreeWidget#TranslationSelectionTree::indicator { width: 17px; height: 17px; background-color: #181925; border: 1px solid #596174; border-radius: 5px; }
+QTreeWidget#TranslationSelectionTree::indicator:hover { border-color: #7CA5D1; }
+QTreeWidget#TranslationSelectionTree::indicator:checked { background-color: #20C7B7; border-color: #5EEAD4; }
+QTreeWidget#TranslationSelectionTree QHeaderView::section { background-color: #202231; color: #B8C1D1; border: none; border-bottom: 1px solid #34364A; padding: 8px; font-weight: 650; }
 QScrollArea { background: transparent; border: none; }
 QScrollArea > QWidget > QWidget { background-color: transparent; }
 QScrollBar:vertical { width: 9px; background: transparent; margin: 4px 2px 4px 2px; }
@@ -195,6 +202,12 @@ QTabBar::tab { background: #EEF0F5; color: #687386; border-color: #D9DDE7; }
 QTabBar::tab:selected { background: #EEE9FB; color: #4D2C9B; border-color: #6B46C1; }
 QSlider::groove:horizontal { background: #D9DDE7; }
 QPlainTextEdit#LogView, QPlainTextEdit { background-color: #E9EDF3; color: #263142; border-color: #C9D0DA; }
+QTreeWidget#TranslationSelectionTree { background-color: #F8F9FC; color: #283142; border-color: #C9D0DA; alternate-background-color: #EEF1F5; selection-background-color: #DCEAF8; }
+QTreeWidget#TranslationSelectionTree::item:hover { background-color: #E5EEF8; border-color: #9EB8D3; color: #172033; }
+QTreeWidget#TranslationSelectionTree::indicator { background-color: #F6F7FA; border-color: #AEB6C6; }
+QTreeWidget#TranslationSelectionTree::indicator:hover { border-color: #5484B4; }
+QTreeWidget#TranslationSelectionTree::indicator:checked { background-color: #0F9F92; border-color: #087E75; }
+QTreeWidget#TranslationSelectionTree QHeaderView::section { background-color: #E5E9F0; color: #596579; border-bottom-color: #BFC7D2; }
 QScrollBar::handle:vertical, QScrollBar::handle:horizontal { background: #B8BFCD; }
 QScrollBar::handle:vertical:hover { background: #949DAC; }
 """

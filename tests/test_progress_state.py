@@ -1,4 +1,4 @@
-import unittest
+﻿import unittest
 
 from mineai.runtime.state import JobSnapshot, JobState
 

@@ -1,10 +1,11 @@
-name: Tests
+﻿name: Tests
 
 on:
   push:
-    branches: [beta]
+    branches: [main, beta]
   pull_request:
-    branches: [beta]
+    branches: [main, beta]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -29,7 +30,7 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libegl1 libgl1
       - name: Compile sources
-        run: python -m compileall -q mineai tests translator.py
+        run: python -m compileall -q formatkit mineai tests tools translator.py
       - name: Run unit tests
         run: python -m unittest discover -s tests -v
       - name: Qt production smoke
@@ -62,3 +63,9 @@ jobs:
             throw "Packaged EXE is unexpectedly small: $size bytes"
           }
           Write-Host "Packaged EXE size $size bytes"
+      - name: Upload Windows build
+        uses: actions/upload-artifact@v4
+        with:
+          name: MineAI-Translator-Windows
+          path: dist/MineAI_Translator.exe
+          if-no-files-found: error
