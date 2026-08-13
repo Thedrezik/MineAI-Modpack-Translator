@@ -1,4 +1,4 @@
-import os
+﻿import os
 import tempfile
 import unittest
 from types import SimpleNamespace
@@ -89,6 +89,154 @@ class SameScriptValidationTests(unittest.TestCase):
         )
         self.assertFalse(accepted)
         self.assertEqual(reason, "нет символов целевого языка")
+
+
+class CandidateSafetyTests(unittest.TestCase):
+    def test_phrase_made_only_of_article_and_protected_term_is_accepted(self) -> None:
+        item = EngineItem(
+            key="heading",
+            original="The UI",
+            masked="The [#0#]",
+            mapping={"[#0#]": "UI"},
+        )
+
+        accepted, reason, identity = _validate_candidate(
+            item,
+            "UI",
+            {"api": "ru", "regex": r"[А-Яа-яЁё]"},
+        )
+
+        self.assertTrue(accepted, reason)
+        self.assertIsNone(reason)
+        self.assertFalse(identity)
+
+    def test_partially_untranslated_leading_article_is_rejected(self) -> None:
+        item = EngineItem(
+            key="description",
+            original="The Gem Case is a storage device",
+            masked="The Gem Case is a storage device",
+        )
+
+        accepted, reason, identity = _validate_candidate(
+            item,
+            "The Футляр для самоцветов — устройство хранения",
+            {"api": "ru", "regex": r"[А-Яа-яЁё]"},
+        )
+
+        self.assertFalse(accepted)
+        self.assertEqual(reason, "оставлен английский артикль в начале строки")
+        self.assertFalse(identity)
+
+    def test_long_untranslated_english_tail_is_rejected(self) -> None:
+        item = EngineItem(
+            key="description",
+            original=(
+                "This helper means you do not have to keep checking if the "
+                "items are available."
+            ),
+            masked=(
+                "This helper means you do not have to keep checking if the "
+                "items are available."
+            ),
+        )
+
+        accepted, reason, identity = _validate_candidate(
+            item,
+            (
+                "Помощник работает, meaning you don't have to keep checking "
+                "if the items are available."
+            ),
+            {"api": "ru", "regex": r"[А-Яа-яЁё]"},
+        )
+
+        self.assertFalse(accepted)
+        self.assertEqual(reason, "оставлен длинный английский фрагмент")
+        self.assertFalse(identity)
+
+    def test_short_english_instruction_inside_russian_text_is_rejected(self) -> None:
+        item = EngineItem(
+            key="tooltip",
+            original="Connect on the right to configure the filter.",
+            masked="Connect on the right to configure the filter.",
+        )
+
+        accepted, reason, identity = _validate_candidate(
+            item,
+            "Настройте фильтр: connect on the right.",
+            {"api": "ru", "regex": r"[А-Яа-яЁё]"},
+        )
+
+        self.assertFalse(accepted)
+        self.assertEqual(reason, "оставлен длинный английский фрагмент")
+        self.assertFalse(identity)
+
+    def test_english_product_name_inside_russian_text_is_accepted(self) -> None:
+        item = EngineItem(
+            key="description",
+            original="Use the ME Advanced Pattern Provider in the network.",
+            masked="Use the ME Advanced Pattern Provider in the network.",
+        )
+
+        accepted, reason, _identity = _validate_candidate(
+            item,
+            "Используйте ME Advanced Pattern Provider в сети.",
+            {"api": "ru", "regex": r"[А-Яа-яЁё]"},
+        )
+
+        self.assertTrue(accepted, reason)
+
+    def test_overlapping_protected_fragments_are_counted_without_overlap(self) -> None:
+        item = EngineItem(
+            key="power",
+            original="RF cost and RF/t usage",
+            masked="[#0#] cost and [#1#] usage",
+            mapping={"[#0#]": "RF", "[#1#]": "RF/t"},
+        )
+
+        accepted, reason, identity = _validate_candidate(
+            item,
+            "Стоимость RF и расход RF/t",
+            {"api": "ru", "regex": r"[А-Яа-яЁё]"},
+        )
+
+        self.assertTrue(accepted, reason)
+        self.assertIsNone(reason)
+        self.assertFalse(identity)
+
+    def test_overlapping_fragment_does_not_replace_missing_standalone_value(self) -> None:
+        item = EngineItem(
+            key="power",
+            original="RF cost and RF/t usage",
+            masked="[#0#] cost and [#1#] usage",
+            mapping={"[#0#]": "RF", "[#1#]": "RF/t"},
+        )
+
+        accepted, reason, identity = _validate_candidate(
+            item,
+            "Расход RF/t",
+            {"api": "ru", "regex": r"[А-Яа-яЁё]"},
+        )
+
+        self.assertFalse(accepted)
+        self.assertIn("'RF': ожидалось 1, получено 0", reason)
+        self.assertFalse(identity)
+
+    def test_candidate_with_extra_newline_is_rejected(self) -> None:
+        item = EngineItem(
+            key="line",
+            original="Engineer's Crafting Table",
+            masked="Engineer's Crafting Table",
+        )
+
+        accepted, reason, identity = _validate_candidate(
+            item,
+            "Верстак инженера\nДополнение",
+            {"api": "ru", "regex": r"[А-Яа-яЁё]"},
+        )
+
+        self.assertFalse(accepted)
+        self.assertEqual(reason, "изменено количество переносов строк: 0 -> 1")
+        self.assertFalse(identity)
 
 
 class SameScriptQuestBaselineTests(unittest.TestCase):

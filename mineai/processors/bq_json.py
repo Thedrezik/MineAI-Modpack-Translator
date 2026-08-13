@@ -1,4 +1,4 @@
-import json
+﻿import json
 import os
 import shutil
 
@@ -28,7 +28,13 @@ class BQProcessor:
         self.state = state
         self.callbacks = callbacks
 
-    def process(self, file_path: str, *, target_lang: dict, mode: str) -> None:
+    def process(
+        self,
+        file_path: str,
+        *,
+        target_lang: dict,
+        mode: str,
+    ) -> str | None:
         backup = file_path + ".bak"
         force_baseline = (
             resolve_bq_force_baseline(file_path)
@@ -128,3 +134,4 @@ class BQProcessor:
                     f"{os.path.basename(file_path)}: {exc}",
                     "yellow",
                 )
+        return file_path

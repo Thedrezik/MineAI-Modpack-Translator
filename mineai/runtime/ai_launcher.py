@@ -1,4 +1,4 @@
-import subprocess
+﻿import subprocess
 import threading
 import time
 from collections.abc import Callable

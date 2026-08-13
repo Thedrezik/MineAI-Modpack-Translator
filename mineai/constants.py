@@ -1,4 +1,4 @@
-SETTINGS_FILE = "settings.ini"
+﻿SETTINGS_FILE = "settings.ini"
 CACHE_FILE_STD = "cache.json"
 CACHE_FILE_AI = "ai_cache.json"
 DICT_FILE = "dictionary.json"
@@ -6,6 +6,7 @@ KOBOLD_API = "http://localhost:5001/v1/chat/completions"
 KOBOLD_MODELS_URL = "http://localhost:5001/v1/models"
 OPENROUTER_API = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_OPENROUTER_MODEL = "google/gemma-2-9b-it:free"
+LMSTUDIO_BASE_URL = "http://localhost:1234/v1"
 
 KEYS_TO_TRANSLATE = frozenset({
     "name", "title", "text", "description", "subtitle", "label", "hover_text", "link_text",
@@ -15,7 +16,14 @@ BOOK_PATH_MARKERS = ("patchouli", "lexicon", "guide")
 MD_PATH_MARKERS = ("/en_us/", "/ae2guide/", "/guide/", "/manual/", "/lexicon/")
 RESEARCH_PATH_MARKERS = ("/research/", "/researches/", "/quests/")
 
-LOOSE_JSON_SEARCH_DIRS = ("kubejs/assets", "defaultconfigs", "config/ftbquests/lang")
+LOOSE_JSON_SEARCH_DIRS = (
+    "kubejs",
+    "defaultconfigs",
+    "config",
+    "resourcepacks",
+    "packmenu",
+    "patchouli_books",
+)
 
 IGNORE_TERMS = [
     "RF", "FE", "EU", "J", "mB", "mB/t", "RF/t", "FE/t", "AE", "kW", "kRF", "mB/tick",
@@ -40,6 +48,7 @@ LANGUAGES = {
 }
 
 PACK_FORMATS = {
+    "1.7.10": {"rp": 1, "dp": 1},
     "1.12.2": {"rp": 3, "dp": 1},
     "1.16.5": {"rp": 6, "dp": 6},
     "1.18.2": {"rp": 8, "dp": 9},
@@ -49,6 +58,9 @@ PACK_FORMATS = {
     "1.20.4": {"rp": 22, "dp": 26},
     "1.20.6": {"rp": 32, "dp": 41},
     "1.21.1": {"rp": 34, "dp": 48},
+    "1.21.11": {"rp": 75, "dp": 94},
+    "26.1.2": {"rp": 84, "dp": 101.1},
+    "26.2": {"rp": 88, "dp": 107.1},
 }
 
 MC_VERSIONS = list(PACK_FORMATS.keys())

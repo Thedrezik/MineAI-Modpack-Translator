@@ -1,4 +1,4 @@
-import json
+﻿import json
 import os
 import tempfile
 import unittest
@@ -13,7 +13,13 @@ with tempfile.TemporaryDirectory() as _import_cwd:
     os.chdir(_import_cwd)
     try:
         from mineai.engines.base import EngineCallbacks, EngineItem
-        from mineai.engines.llm_common import BatchLlmEngine, build_translation_prompt
+        from mineai.engines.llm_common import (
+            BatchLlmEngine,
+            build_translation_prompt,
+            dump_ai_error,
+            placeholders_match,
+            repair_markers,
+        )
         from mineai.engines.service import TranslationService
         from mineai.text_processing import mask_protected_fragments
     finally:
@@ -73,6 +79,243 @@ class ServiceWithEngine(TranslationService):
 
 
 class BatchLlmEngineTests(unittest.TestCase):
+    def test_finalizer_restores_source_boundary_newline(self) -> None:
+        source = "Description\r\n"
+        masked, mapping = mask_protected_fragments(source)
+
+        engine = BatchLlmEngine(
+            call_api=lambda _prompt, _limit: json.dumps(
+                {"entry": masked.replace("Description", "Описание")},
+                ensure_ascii=False,
+            )
+        )
+        item = EngineItem("entry", source, masked, mapping)
+
+        result = engine.translate_batch(
+            {"entry": item},
+            TARGET_LANG,
+            callbacks(),
+        )
+
+        self.assertEqual(result, {"entry": "Описание\r\n"})
+
+    def test_ai_error_log_marks_failed_attempt_as_non_final(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            previous = os.getcwd()
+            os.chdir(directory)
+            try:
+                dump_ai_error("Source", "Broken", "Markers changed")
+                with open("ai_error_log.txt", encoding="utf-8-sig") as stream:
+                    content = stream.read()
+            finally:
+                os.chdir(previous)
+
+        self.assertIn("НЕУДАЧНАЯ ПОПЫТКА ИИ", content)
+        self.assertIn("может быть исправлена повтором", content)
+
+    def test_placeholder_order_must_match_source(self) -> None:
+        self.assertFalse(
+            placeholders_match("[#1#]Перевод[#0#]", "[#0#]Source[#1#]")
+        )
+
+    def test_suspicious_duplicate_batch_results_are_retried(self) -> None:
+        calls: list[dict[str, str]] = []
+
+        def call_api(prompt: str, _limit: int) -> str:
+            payload = prompt_payload(prompt)
+            calls.append(payload)
+            if len(calls) == 1:
+                duplicate = (
+                    "Это ошибочно объединённый перевод двух разных длинных строк."
+                )
+                return json.dumps(
+                    {key: duplicate for key in payload}, ensure_ascii=False
+                )
+            return json.dumps(
+                {
+                    key: (
+                        "Первая строка переведена отдельно и корректно."
+                        if key == "first"
+                        else "Вторая строка переведена отдельно и корректно."
+                    )
+                    for key in payload
+                },
+                ensure_ascii=False,
+            )
+
+        engine = BatchLlmEngine(call_api=call_api, retries=1)
+        items = {
+            "first": EngineItem(
+                "first",
+                "The first independent sentence describes a crafting machine.",
+                "The first independent sentence describes a crafting machine.",
+            ),
+            "second": EngineItem(
+                "second",
+                "The second independent sentence explains a wireless terminal.",
+                "The second independent sentence explains a wireless terminal.",
+            ),
+        }
+
+        result = engine.translate_batch(items, TARGET_LANG, callbacks())
+
+        self.assertNotEqual(result["first"], result["second"])
+        self.assertEqual(len(calls), 2)
+
+    def test_repairs_added_newline_without_retrying_the_candidate(self) -> None:
+        calls: list[dict[str, str]] = []
+
+        def call_api(prompt: str, _max_tokens: int) -> str:
+            payload = prompt_payload(prompt)
+            calls.append(payload)
+            if len(calls) == 1:
+                return json.dumps(
+                    {
+                        "good": "Генератор",
+                        "broken": "Верстак инженера\nДополнение",
+                    },
+                    ensure_ascii=False,
+                )
+            return json.dumps(
+                {"broken": "Верстак инженера"},
+                ensure_ascii=False,
+            )
+
+        engine = BatchLlmEngine(call_api=call_api, retries=1)
+        items = {
+            "good": EngineItem("good", "Generator", "Generator"),
+            "broken": EngineItem(
+                "broken",
+                "Engineer's Crafting Table",
+                "Engineer's Crafting Table",
+            ),
+        }
+
+        result = engine.translate_batch(items, TARGET_LANG, callbacks())
+
+        self.assertEqual(
+            result,
+            {
+                "good": "Генератор",
+                "broken": "Верстак инженера Дополнение",
+            },
+        )
+        self.assertEqual(
+            [set(payload) for payload in calls],
+            [{"good", "broken"}],
+        )
+
+    def test_hash_wrapped_template_variable_is_fully_protected(self) -> None:
+        masked, mapping = mask_protected_fragments(
+            "Mana cost: #mana_cost#"
+        )
+
+        self.assertEqual(masked, "Mana cost: [#0#]")
+        self.assertEqual(mapping, {"[#0#]": "#mana_cost#"})
+
+    def test_repairs_bare_numbered_marker_without_extra_request(self) -> None:
+        calls = 0
+
+        def call_api(_prompt: str, _max_tokens: int) -> str:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return json.dumps(
+                    {"description": "Модуль.#0#Подробнее"},
+                    ensure_ascii=False,
+                )
+            return "Module.[#0#]Details"
+
+        engine = BatchLlmEngine(call_api=call_api, retries=1)
+        items = {
+            "description": EngineItem(
+                "description",
+                "Module.$(p)Details",
+                "Module.[#0#]Details",
+                {"[#0#]": "$(p)"},
+            )
+        }
+
+        result = engine.translate_batch(items, TARGET_LANG, callbacks())
+
+        self.assertEqual(result, {"description": "Модуль.$(p)Подробнее"})
+        self.assertEqual(calls, 1)
+
+    def test_marker_repair_rejects_rewritten_translation_text(self) -> None:
+        repaired = repair_markers(
+            lambda _prompt, _limit: "Original [#0#] text",
+            "Original [#0#] text",
+            "Перевод [#9#] текста",
+            256,
+        )
+
+        self.assertIsNone(repaired)
+
+    def test_retries_partially_untranslated_leading_article(self) -> None:
+        calls: list[dict[str, str]] = []
+
+        def call_api(prompt: str, _max_tokens: int) -> str:
+            payload = prompt_payload(prompt)
+            calls.append(payload)
+            if len(calls) == 1:
+                return json.dumps(
+                    {"description": "The [#0#]Футляр для самоцветов[#1#]"},
+                    ensure_ascii=False,
+                )
+            return json.dumps(
+                {"description": "[#0#]Футляр для самоцветов[#1#]"},
+                ensure_ascii=False,
+            )
+
+        engine = BatchLlmEngine(call_api=call_api, retries=1)
+        items = {
+            "description": EngineItem(
+                "description",
+                "The $(9)Gem Case$()",
+                "The [#0#]Gem Case[#1#]",
+                {"[#0#]": "$(9)", "[#1#]": "$()"},
+            )
+        }
+
+        result = engine.translate_batch(items, TARGET_LANG, callbacks())
+
+        self.assertEqual(result, {"description": "$(9)Футляр для самоцветов$()"})
+        self.assertEqual(
+            [set(payload) for payload in calls],
+            [{"description"}, {"description"}],
+        )
+
+    def test_retries_unchanged_translatable_title_with_stricter_prompt(self) -> None:
+        prompts: list[str] = []
+
+        def call_api(prompt: str, _max_tokens: int) -> str:
+            prompts.append(prompt)
+            payload = prompt_payload(prompt)
+            if len(prompts) == 1:
+                return json.dumps(payload, ensure_ascii=False)
+            return json.dumps(
+                {"title": "Дополнения для карманного компьютера"},
+                ensure_ascii=False,
+            )
+
+        engine = BatchLlmEngine(call_api=call_api, retries=1)
+        items = {
+            "title": EngineItem(
+                "title",
+                "Pocket Computer Addons",
+                "Pocket Computer Addons",
+            )
+        }
+
+        result = engine.translate_batch(items, TARGET_LANG, callbacks())
+
+        self.assertEqual(
+            result,
+            {"title": "Дополнения для карманного компьютера"},
+        )
+        self.assertEqual(len(prompts), 2)
+        self.assertIn("Do not copy ordinary source text unchanged", prompts[1])
+
     def test_safe_prompt_requires_all_numbered_placeholders(self) -> None:
         prompt = build_translation_prompt(
             {"key": "Requires [#0#] and [#1#]"},
@@ -98,6 +341,24 @@ class BatchLlmEngineTests(unittest.TestCase):
         self.assertIn("MARKER WHITELIST", prompt)
         self.assertIn('"key": [#0#] [#1#]', prompt)
         self.assertIn("no skips, no renumbering, no repeats", prompt)
+
+    def test_russian_book_prompt_contains_minecraft_term_hints(self) -> None:
+        prompt = build_translation_prompt(
+            {"title": "Copy Paste Gadget"},
+            "Russian",
+            mode="safe",
+            context="Building Gadgets",
+            prompt_type="books",
+        )
+
+        self.assertIn(
+            "Copy Paste Gadget = Гаджет копирования и вставки",
+            prompt,
+        )
+        self.assertIn(
+            "Cut Paste Gadget = Гаджет вырезания и вставки",
+            prompt,
+        )
 
     def test_retries_only_a_missing_key(self) -> None:
         calls: list[dict[str, str]] = []

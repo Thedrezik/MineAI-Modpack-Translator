@@ -1,4 +1,4 @@
-import json
+﻿import json
 import os
 import tempfile
 import unittest
@@ -143,6 +143,68 @@ class EngineCancellationTests(unittest.TestCase):
             )
 
         self.assertEqual(result, {})
+
+    def test_google_single_retries_reordered_placeholders(self):
+        engine = GoogleEngine(workers=1, mode="single")
+        item = EngineItem(
+            key="k",
+            original="Read [Guide](guide.md).",
+            masked="Read [#0#]Guide[#1#].",
+            mapping={"[#0#]": "[", "[#1#]": "](guide.md)"},
+        )
+
+        with mock.patch.object(
+            engine,
+            "_request",
+            side_effect=(
+                "Читайте [#1#]руководство[#0#].",
+                "Читайте [#0#]руководство[#1#].",
+            ),
+        ) as request:
+            result = engine.translate_batch(
+                {"k": item},
+                {"api": "ru"},
+                self.callbacks(),
+            )
+
+        self.assertEqual(result, {"k": "Читайте [руководство](guide.md)."})
+        self.assertEqual(request.call_count, 2)
+
+    def test_google_batch_retries_smeared_duplicate_rows_separately(self):
+        engine = GoogleEngine(workers=1, mode="batch")
+        items = {
+            "first": EngineItem(
+                "first",
+                "The first independent sentence describes a crafting machine.",
+                "The first independent sentence describes a crafting machine.",
+            ),
+            "second": EngineItem(
+                "second",
+                "The second independent sentence explains a wireless terminal.",
+                "The second independent sentence explains a wireless terminal.",
+            ),
+        }
+        duplicate = "Это ошибочно объединённый перевод двух разных длинных строк."
+
+        with mock.patch.object(
+            engine,
+            "_request",
+            side_effect=(
+                duplicate + GoogleEngine.BATCH_SEP + duplicate,
+                "Первая строка описывает машину для крафта.",
+                "Вторая строка объясняет беспроводной терминал.",
+            ),
+        ) as request, mock.patch(
+            "mineai.engines.google.time.sleep", return_value=None
+        ):
+            result = engine.translate_batch(
+                items,
+                {"api": "ru"},
+                self.callbacks(),
+            )
+
+        self.assertNotEqual(result["first"], result["second"])
+        self.assertEqual(request.call_count, 3)
 
     def test_openrouter_cancellation_bubbles_to_engine_boundary_without_error_log(self):
         engine = OpenRouterEngine("key", "model")

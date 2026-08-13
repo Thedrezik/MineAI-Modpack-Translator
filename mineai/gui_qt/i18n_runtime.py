@@ -1,4 +1,4 @@
-"""Localized dynamic strings used by readiness and dashboard metrics."""
+﻿"""Localized dynamic strings used by readiness and dashboard metrics."""
 
 from __future__ import annotations
 
@@ -13,6 +13,8 @@ _TEXT = {
         "ready.deepl_missing": "Не указан API-ключ DeepL",
         "ready.openrouter_key": "Не указан ключ OpenRouter",
         "ready.openrouter_model": "Не выбрана модель OpenRouter",
+        "ready.lmstudio_url": "Не указан адрес LM Studio",
+        "ready.lmstudio_model": "Не выбрана модель LM Studio",
         "ready.local_model": "Не выбрана локальная GGUF-модель",
         "ready.local_unavailable": "Файл GGUF-модели недоступен",
         "ready.unknown": "Неизвестный движок",
@@ -28,6 +30,8 @@ _TEXT = {
         "ready.deepl_missing": "DeepL API key is missing",
         "ready.openrouter_key": "OpenRouter key is missing",
         "ready.openrouter_model": "OpenRouter model is not selected",
+        "ready.lmstudio_url": "LM Studio address is missing",
+        "ready.lmstudio_model": "LM Studio model is not selected",
         "ready.local_model": "Local GGUF model is not selected",
         "ready.local_unavailable": "GGUF model file is unavailable",
         "ready.unknown": "Unknown engine",

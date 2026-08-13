@@ -1,23 +1,27 @@
-import copy
-import re
+﻿import copy
 from dataclasses import dataclass
 from typing import Any
 
+from mineai.formats.document import DocumentPath, StructuredDocument, TextNode
+from mineai.formats.markdown import (
+    MarkdownSelection,
+    collect_book_markdown_selection,
+    markdown_structure_mismatch_indices,
+    markdown_structure_signature,
+    markdown_structures_compatible,
+    normalize_markdown_newlines,
+    validate_markdown_structure,
+)
 from mineai.json_utils import (
     apply_translations_by_path,
     iter_translatable_strings,
+    key_to_path,
     path_to_key,
 )
+from mineai.language_validation import translation_needs_repair
 from mineai.text_processing import (
-    apply_smart_glue,
     is_technical_term,
     looks_like_source_language,
-)
-
-
-YAML_TITLE_RE = re.compile(
-    r'^(\s*title\s*:\s*[\'"]?)(.*?)([\'"]?)$',
-    re.IGNORECASE,
 )
 
 
@@ -29,28 +33,17 @@ def skip_threshold_reached(total_translatable: int, pending_count: int) -> bool:
     return translated_count / total_translatable >= 0.9
 
 
-def _needs_translation(source: str, existing: str, mode: str) -> bool:
-    if mode == "force":
-        return True
-    return not existing.strip() or existing == source
-
-
 def collect_book_json_selection(
     source_data: Any,
     target_data: Any,
     mode: str,
+    target_lang: dict | None = None,
 ) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
     """Return filtered source map, preserved target map and pending entries."""
     all_source_map = {
         path_to_key(path): text
         for path, text in iter_translatable_strings(source_data)
         if text.strip()
-    }
-    source_map = {
-        key: text
-        for key, text in all_source_map.items()
-        if looks_like_source_language(text)
-        and not is_technical_term(text)
     }
     target_map = (
         {
@@ -61,19 +54,37 @@ def collect_book_json_selection(
         if target_data
         else {}
     )
-
-    preserved = {
-        key: existing
-        for key, existing in target_map.items()
-        if key in all_source_map
-        and existing != all_source_map[key]
-        and mode != "force"
+    nodes = tuple(
+        TextNode(
+            key=key,
+            path=DocumentPath(key_to_path(key)),
+            source=text,
+            existing=(
+                ""
+                if target_lang
+                and translation_needs_repair(
+                    text,
+                    target_map.get(key, ""),
+                    target_lang,
+                )
+                else target_map.get(key, "")
+            ),
+            translatable=(
+                looks_like_source_language(text)
+                and not is_technical_term(text)
+            ),
+            context="json-book",
+        )
+        for key, text in all_source_map.items()
+    )
+    document = StructuredDocument(source=source_data, nodes=nodes)
+    source_map = {
+        node.key: node.source
+        for node in document.nodes
+        if node.translatable
     }
-    pending = {
-        key: source
-        for key, source in source_map.items()
-        if _needs_translation(source, target_map.get(key, ""), mode)
-    }
+    preserved = document.preserved(mode)
+    pending = document.pending(mode)
     return source_map, preserved, pending
 
 
@@ -89,104 +100,12 @@ def build_book_json_output(
 
 
 @dataclass
-class MarkdownSelection:
-    source_text: str
-    lines_out: list[str]
-    pending: dict[str, str]
-    title_meta: dict[str, tuple[str, str]]
-    total_translatable: int
-
-
-def _extract_yaml_title(line: str) -> tuple[str, str, str] | None:
-    match = YAML_TITLE_RE.match(line)
-    if not match:
-        return None
-    return match.group(1), match.group(2), match.group(3)
-
-
-def collect_book_markdown_selection(
-    source_text: str,
-    target_text: str,
-    mode: str,
-    *,
-    smart_glue: bool,
-) -> MarkdownSelection:
-    """Build one shared Markdown/YAML translation plan for estimator and writer."""
-    if smart_glue:
-        source_text = apply_smart_glue(source_text)
-
-    source_lines = source_text.split("\n")
-    target_lines = target_text.split("\n") if target_text else []
-    lines_out = list(source_lines)
-    pending: dict[str, str] = {}
-    title_meta: dict[str, tuple[str, str]] = {}
-    total_translatable = 0
-    in_yaml = False
-
-    for index, line in enumerate(source_lines):
-        stripped = line.strip()
-        if stripped == "---":
-            in_yaml = not in_yaml
-            continue
-
-        existing_line = target_lines[index] if index < len(target_lines) else ""
-
-        if in_yaml:
-            if not stripped.lower().startswith("title:"):
-                continue
-            source_title = _extract_yaml_title(line)
-            if not source_title:
-                continue
-            prefix, title, suffix = source_title
-            if (
-                not title.strip()
-                or not looks_like_source_language(title)
-                or is_technical_term(title)
-            ):
-                continue
-
-            total_translatable += 1
-            title_meta[str(index)] = (prefix, suffix)
-            existing_title_parts = _extract_yaml_title(existing_line)
-            existing_title = (
-                existing_title_parts[1] if existing_title_parts else ""
-            )
-            if _needs_translation(title, existing_title, mode):
-                pending[str(index)] = title
-            else:
-                lines_out[index] = existing_line
-            continue
-
-        if stripped.startswith("<") or stripped.startswith("!["):
-            continue
-        if (
-            not stripped
-            or not looks_like_source_language(line)
-            or is_technical_term(line)
-        ):
-            continue
-
-        total_translatable += 1
-        if _needs_translation(line, existing_line, mode):
-            pending[str(index)] = line
-        else:
-            lines_out[index] = existing_line
-
-    return MarkdownSelection(
-        source_text=source_text,
-        lines_out=lines_out,
-        pending=pending,
-        title_meta=title_meta,
-        total_translatable=total_translatable,
-    )
-
-
-@dataclass
 class BQSelection:
     properties_key: str | None
     betterquesting_key: str | None
     total_translatable: int
     pending: dict[str, str]
+    document: StructuredDocument | None = None
 
 
 def collect_bq_selection(
@@ -224,16 +143,45 @@ def collect_bq_selection(
                     if text:
                         fields[actual_key] = text
 
-    pending = {
-        key: text
+    nodes = tuple(
+        TextNode(
+            key=key,
+            path=DocumentPath(
+                tuple(
+                    part
+                    for part in (
+                        properties_key,
+                        betterquesting_key,
+                        key,
+                    )
+                    if part is not None
+                )
+            ),
+            source=text,
+            translatable=not (
+                looks_like_source_language(text)
+                and is_technical_term(text)
+            ),
+            context="betterquesting",
+        )
         for key, text in fields.items()
-        if mode == "force" or not already_translated(text, target_regex)
+    )
+    document = StructuredDocument(source=data, nodes=nodes)
+    pending = {
+        node.key: node.source
+        for node in document.nodes
+        if node.translatable
+        and (
+            mode == "force"
+            or not already_translated(node.source, target_regex)
+        )
     }
     return BQSelection(
         properties_key=properties_key,
         betterquesting_key=betterquesting_key,
-        total_translatable=len(fields),
+        total_translatable=document.total_translatable,
         pending=pending,
+        document=document,
     )
 
 
@@ -241,6 +189,7 @@ def collect_bq_selection(
 class SnbtSelection:
     total_translatable: int
     pending: list[str]
+    document: StructuredDocument | None = None
 
 
 def collect_snbt_selection(
@@ -248,19 +197,23 @@ def collect_snbt_selection(
     current_content: str,
     mode: str,
     target_regex: str,
+    *,
+    allowed_entry_ids: set[str] | frozenset[str] | None = None,
 ) -> SnbtSelection:
-    from mineai.processors.snbt_extract import extract_snbt_strings
+    from mineai.processors.snbt_extract import build_snbt_document
 
-    original_strings = extract_snbt_strings(original_content)
-    pending = (
-        original_strings
-        if mode == "force"
-        else extract_snbt_strings(
-            current_content,
-            skip_translated_regex=target_regex,
-        )
+    document = build_snbt_document(
+        original_content,
+        current_content,
+        allowed_entry_ids=allowed_entry_ids,
+    )
+    pending = document.pending_source_values(
+        mode,
+        target_regex,
+        same_latin_script=False,
     )
     return SnbtSelection(
-        total_translatable=len(original_strings),
-        pending=pending,
+        total_translatable=len(document.unique_translatable_sources()),
+        pending=list(pending),
+        document=document,
     )

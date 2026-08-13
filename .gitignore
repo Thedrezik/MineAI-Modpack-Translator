@@ -2,6 +2,8 @@
 build/
 dist/
 *.spec
+!MineAI_Translator_Beta36.spec
+!MineAI_Translator_BetaAll_40.spec
 
 # Кэш Python
 __pycache__/

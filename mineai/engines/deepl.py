@@ -1,4 +1,4 @@
-import time
+﻿import time
 import requests
 
 from mineai.engines.base import EngineCallbacks, EngineItem, TranslationEngine
@@ -47,7 +47,10 @@ class DeepLEngine(TranslationEngine):
                 for idx, key in enumerate(chunk_keys):
                     raw = translations[idx]["text"]
                     raw = unmask_translation(raw, items[key].mapping)
-                    result[key] = polish_translation(raw)
+                    result[key] = polish_translation(
+                        raw,
+                        boundary_source=items[key].original,
+                    )
             except RequestCancelled:
                 break
             except (requests.RequestException, KeyError, IndexError, TypeError, ValueError) as exc:

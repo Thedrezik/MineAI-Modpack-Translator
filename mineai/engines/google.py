@@ -1,11 +1,17 @@
-import re
+﻿import re
 import time
 import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from mineai.engines.base import EngineCallbacks, EngineItem, TranslationEngine
 from mineai.engines.http_retry import RequestCancelled, request_with_retry
-from mineai.text_processing import polish_translation, unmask_translation
+from mineai.text_processing import (
+    PLACEHOLDER_PATTERN,
+    polish_translation,
+    suspicious_duplicate_keys,
+    translation_length_issue,
+    unmask_translation,
+)
 
 
 class GoogleEngine(TranslationEngine):
@@ -36,7 +42,41 @@ class GoogleEngine(TranslationEngine):
 
     def _finalize(self, raw: str, item: EngineItem) -> str:
         text = unmask_translation(raw, item.mapping)
-        return polish_translation(text)
+        return polish_translation(text, boundary_source=item.original)
+
+    @staticmethod
+    def _raw_is_safe(raw: str, item: EngineItem) -> bool:
+        return (
+            PLACEHOLDER_PATTERN.findall(raw)
+            == PLACEHOLDER_PATTERN.findall(item.masked)
+            and translation_length_issue(item.masked, raw) is None
+        )
+
+    def _request_item(
+        self,
+        item: EngineItem,
+        api_code: str,
+        callbacks: EngineCallbacks,
+        *,
+        attempts: int,
+        timeout: int = 10,
+    ) -> str | None:
+        for attempt in range(attempts):
+            raw = self._request(
+                item.masked,
+                api_code,
+                timeout=timeout,
+                on_log=callbacks.on_log,
+                should_continue=callbacks.should_run,
+            )
+            if raw and self._raw_is_safe(raw, item):
+                return raw
+            if raw and attempt + 1 < attempts:
+                callbacks.on_log(
+                    "⚠️ Google: повреждены маркеры или размер строки; повтор",
+                    "yellow",
+                )
+        return None
 
     def translate_batch(
         self,
@@ -59,11 +99,9 @@ class GoogleEngine(TranslationEngine):
         def work(key: str, masked: str) -> tuple[str, str | None]:
             if not callbacks.should_run():
                 return key, None
-            return key, self._request(
-                masked,
-                api_code,
-                on_log=callbacks.on_log,
-                should_continue=callbacks.should_run,
+            del masked
+            return key, self._request_item(
+                items[key], api_code, callbacks, attempts=2
             )
 
         with ThreadPoolExecutor(max_workers=self.workers) as pool:
@@ -127,19 +165,61 @@ class GoogleEngine(TranslationEngine):
                 except RequestCancelled:
                     break
                 if parts:
+                    raw_by_key = {
+                        key: parts[idx].strip()
+                        for idx, key in enumerate(chunk_keys)
+                    }
+                    retry_keys = {
+                        key
+                        for key, raw in raw_by_key.items()
+                        if not self._raw_is_safe(raw, items[key])
+                    }
+                    duplicate_keys = suspicious_duplicate_keys(
+                        {key: items[key].masked for key in chunk_keys},
+                        raw_by_key,
+                    )
+                    retry_keys.update(duplicate_keys)
+                    if duplicate_keys:
+                        callbacks.on_log(
+                            "⚠️ Google: одинаковый ответ для разных строк; "
+                            "повтор по одной",
+                            "yellow",
+                        )
                     for idx, key in enumerate(chunk_keys):
-                        result[key] = self._finalize(parts[idx].strip(), items[key])
+                        if key not in retry_keys:
+                            result[key] = self._finalize(
+                                parts[idx].strip(), items[key]
+                            )
+                    for key in chunk_keys:
+                        if key not in retry_keys:
+                            continue
+                        if not callbacks.should_run():
+                            break
+                        try:
+                            single = self._request_item(
+                                items[key],
+                                api_code,
+                                callbacks,
+                                attempts=1,
+                                timeout=5,
+                            )
+                        except RequestCancelled:
+                            break
+                        if single:
+                            result[key] = self._finalize(single, items[key])
+                        if callbacks.should_run():
+                            time.sleep(0.3)
                 else:
                     for key in chunk_keys:
                         if not callbacks.should_run():
                             break
                         try:
-                            single = self._request(
-                                items[key].masked,
+                            single = self._request_item(
+                                items[key],
                                 api_code,
+                                callbacks,
+                                attempts=1,
                                 timeout=5,
-                                on_log=callbacks.on_log,
-                                should_continue=callbacks.should_run,
                             )
                         except RequestCancelled:
                             break

@@ -1,4 +1,4 @@
-import unittest
+﻿import unittest
 from unittest import mock
 
 from mineai.runtime.job import TranslationJob

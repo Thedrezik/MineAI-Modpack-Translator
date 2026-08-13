@@ -1,4 +1,4 @@
-"""Pure semantic model for the high-volume Qt journal."""
+﻿"""Pure semantic model for the high-volume Qt journal."""
 
 from __future__ import annotations
 
