@@ -3,9 +3,16 @@ import os
 import re
 import zipfile
 
-from mineai.constants import BOOK_PATH_MARKERS, MD_PATH_MARKERS, RESEARCH_PATH_MARKERS
+from mineai.constants import BOOK_PATH_MARKERS, RESEARCH_PATH_MARKERS
 from mineai.json_utils import iter_translatable_strings, load_lenient_json
+from mineai import formatkit_bridge as _formatkit_bridge
 from mineai.mod_names import get_mod_name
+from mineai.processors.markdown_guides import (
+    get_markdown_target_path,
+    is_source_markdown_guide,
+    is_target_markdown_locale_path,
+)
+from mineai.processors.selection import collect_book_markdown_selection
 from mineai.processors.snbt_extract import extract_snbt_strings
 from mineai.runtime.state import JobState
 from mineai.text_processing import (
@@ -71,13 +78,13 @@ class ModpackAnalyzer:
                         # Отсекаем файлы других локализаций в корне (ru_ru, es_es и т.д.)
                         if re.match(r"^[a-z]{2}_[a-z]{2}\.snbt$", nl) and nl != "en_us.snbt":
                             continue
-                        
+
                         # Отсекаем огромный резервный en_us.snbt, если рядом есть папка en_us
                         if nl == "en_us.snbt" and os.path.isdir(os.path.join(root, "en_us")):
                             continue
 
                         snbt_files.append(os.path.join(root, name))
-        
+
         # ПОИСК BQ
         bq_dir = os.path.join(mc_dir, "config", "betterquesting", "DefaultQuests")
         bq_files: list[str] = []
@@ -86,7 +93,7 @@ class ModpackAnalyzer:
                 for name in files:
                     if name.endswith(".json") and ("QuestLines" in root or "Quests" in root):
                         bq_files.append(os.path.join(root, name))
-                        
+
         for index, path in enumerate(snbt_files):
             if not self.state.should_run():
                 break
@@ -109,13 +116,15 @@ class ModpackAnalyzer:
     def _analyze_jar(self, path, target_file, target_regex, translate_mods, translate_books, on_row, mod_name):
         total_en = 0
         total_tr = 0
+        target_code = target_file.replace(".json", "")
         try:
             with zipfile.ZipFile(path, "r") as zin:
                 locale = {
                     i.filename.lower(): i
                     for i in zin.infolist()
                     if target_file in i.filename.lower()
-                    or f"/{target_file.replace('.json','')}/" in i.filename.lower()
+                    or f"/{target_code}/" in i.filename.lower()
+                    or is_target_markdown_locale_path(i.filename, target_code)
                 }
                 if translate_mods:
                     en, tr = self._analyze_mods_ui(zin, locale, target_file, mod_name, on_row)
@@ -131,11 +140,38 @@ class ModpackAnalyzer:
 
     def _analyze_mods_ui(self, zin, locale, target_file, mod_name, on_row):
         en_c = tr_c = 0
+        target_code = target_file[:-5]
         for item in zin.infolist():
             fl = item.filename.lower()
             if not fl.endswith("en_us.json") or any(x in fl for x in BOOK_PATH_MARKERS):
                 continue
             try:
+                if _formatkit_bridge.is_formatkit_locale_path(item.filename):
+                    source_text = zin.read(item).decode("utf-8-sig")
+                    preliminary = _formatkit_bridge.plan_locale_work(
+                        item.filename,
+                        source_text,
+                        target_code,
+                        None,
+                        "append",
+                    )
+                    assert preliminary is not None
+                    target_key = preliminary.target_path.lower()
+                    target_text = None
+                    if target_key in locale:
+                        target_text = zin.read(locale[target_key]).decode("utf-8-sig")
+                    work = _formatkit_bridge.plan_locale_work(
+                        item.filename,
+                        source_text,
+                        target_code,
+                        target_text,
+                        "append",
+                    )
+                    assert work is not None
+                    en_c += work.total_translatable
+                    tr_c += work.total_translatable - len(work.pending)
+                    continue
+
                 en = load_lenient_json(zin.read(item))
                 tr_key = fl.replace("en_us.json", target_file)
                 tr = load_lenient_json(zin.read(locale[tr_key])) if tr_key in locale else {}
@@ -146,7 +182,7 @@ class ModpackAnalyzer:
                     existing = str(tr.get(key, ""))
                     if existing.strip() and existing != value:
                         tr_c += 1
-            except (json.JSONDecodeError, OSError):
+            except (json.JSONDecodeError, UnicodeError, OSError, ValueError):
                 continue
         if en_c:
             on_row("📦", mod_name, "Интерфейс", tr_c, en_c, int(tr_c / en_c * 100))
@@ -154,6 +190,7 @@ class ModpackAnalyzer:
 
     def _analyze_books(self, zin, locale, target_file, target_regex, mod_name, on_row):
         b_en = b_tr = m_en = m_tr = 0
+        target_code = target_file.replace(".json", "")
         for item in zin.infolist():
             fl = item.filename.lower()
             is_jb = (
@@ -164,15 +201,11 @@ class ModpackAnalyzer:
                     or any(x in fl for x in RESEARCH_PATH_MARKERS)
                 )
             )
-            is_mb = (
-                (fl.endswith(".md") or fl.endswith(".txt"))
-                and "/en_us/" in fl
-                and any(x in fl for x in MD_PATH_MARKERS)
-            )
+            is_mb = is_source_markdown_guide(item.filename)
             if is_jb:
                 try:
                     en = load_lenient_json(zin.read(item))
-                    tr_path = fl.replace("/en_us/", f"/{target_file.replace('.json','')}/")
+                    tr_path = fl.replace("/en_us/", f"/{target_code}/")
                     tr = load_lenient_json(zin.read(locale[tr_path])) if tr_path in locale else {}
                     en_s = [s for p, s in iter_translatable_strings(en) if s.strip() and looks_like_source_language(s)]
                     tr_s = [s for p, s in iter_translatable_strings(tr)] if tr else []
@@ -185,27 +218,21 @@ class ModpackAnalyzer:
             elif is_mb:
                 try:
                     en_t = zin.read(item).decode("utf-8-sig", errors="ignore")
-                    tr_path = fl.replace("/en_us/", f"/{target_file.replace('.json','')}/") if "/en_us/" in fl else fl
-                    tr_t = zin.read(locale[tr_path]).decode("utf-8-sig", errors="ignore") if tr_path in locale else ""
-                    tr_lines = tr_t.split("\n")
-                    in_yaml = False
-                    for idx, line in enumerate(en_t.split("\n")):
-                        if line.strip() == "---":
-                            in_yaml = not in_yaml
-                            continue
-                        if in_yaml:
-                            m = re.match(r'^(\s*title\s*:\s*[\'"]?)(.*?)([\'"]?)$', line, re.IGNORECASE)
-                            if m and looks_like_source_language(m.group(2)):
-                                m_en += 1
-                                if idx < len(tr_lines) and already_translated(tr_lines[idx], target_regex):
-                                    m_tr += 1
-                            continue
-                        if line.strip().startswith("<") or line.strip().startswith("!["):
-                            continue
-                        if line.strip() and looks_like_source_language(line) and not is_technical_term(line):
-                            m_en += 1
-                            if idx < len(tr_lines) and already_translated(tr_lines[idx], target_regex):
-                                m_tr += 1
+                    tr_path = get_markdown_target_path(item.filename, target_code)
+                    tr_key = tr_path.lower()
+                    tr_t = (
+                        zin.read(locale[tr_key]).decode("utf-8-sig", errors="ignore")
+                        if tr_key in locale
+                        else ""
+                    )
+                    selection = collect_book_markdown_selection(
+                        en_t,
+                        tr_t,
+                        "append",
+                        smart_glue=False,
+                    )
+                    m_en += selection.total_translatable
+                    m_tr += selection.total_translatable - len(selection.pending)
                 except OSError:
                     pass
         if b_en:
@@ -226,8 +253,7 @@ class ModpackAnalyzer:
         if en_c:
             on_row("📜", os.path.basename(path), "Квесты", tr_c, en_c, int(tr_c / en_c * 100))
         return en_c, tr_c
-    
-    
+
     def _analyze_bq(self, path: str, target_regex: str, on_row) -> tuple[int, int]:
         try:
             with open(path, "r", encoding="utf-8") as f:
@@ -250,10 +276,10 @@ class ModpackAnalyzer:
                             en_c += 1
                             if already_translated(text, target_regex):
                                 tr_c += 1
-                                
+
         if en_c:
             folder = os.path.basename(os.path.dirname(path))
             name = f"{folder}/{os.path.basename(path)}"
             on_row("📜", name, "BetterQuesting", tr_c, en_c, int(tr_c / en_c * 100))
-            
+
         return en_c, tr_c

@@ -9,10 +9,10 @@ from mineai.constants import LANGUAGES
 from mineai.engines.base import EngineCallbacks
 from mineai.engines.service import TranslationService
 from mineai.output.pack_writer import PackWriter
-from mineai.processors.analyzer import ModpackAnalyzer
+from mineai.processors.formatkit_books_pilot import FormatKitModpackAnalyzer as ModpackAnalyzer
 from mineai.processors.discovery import discover_jar_files, discover_loose_lang_files, discover_snbt_files, discover_bq_files
-from mineai.processors.estimator import StringEstimator
-from mineai.processors.jar import JarProcessor
+from mineai.processors.formatkit_books_pilot import FormatKitBooksStringEstimator as StringEstimator
+from mineai.processors.formatkit_books_pilot_v341 import FormatKitBooksJarProcessor as JarProcessor
 from mineai.processors.bq_json import BQProcessor
 from mineai.processors.loose_json import LooseJsonProcessor
 from mineai.processors.snbt import SnbtProcessor
@@ -358,13 +358,21 @@ class TranslationJob:
         elif not self.state.should_run():
             self.on_log("\n🛑 ОСТАНОВЛЕНО.", "red")
             self.on_status("Остановлено", self.state.line_progress())
-        elif failed_files:
-            self.on_log(
-                f"\n⚠️ ЗАВЕРШЕНО С ОШИБКАМИ: пропущено файлов — {failed_files}.",
-                "yellow",
-            )
-            self.on_status("Завершено с ошибками", 1.0)
         else:
+            failed_strings = self.state.snapshot().failed_strings
+            if failed_files or failed_strings:
+                details: list[str] = []
+                if failed_files:
+                    details.append(f"пропущено файлов — {failed_files}")
+                if failed_strings:
+                    details.append(f"ошибок строк — {failed_strings}")
+                self.on_log(
+                    f"\n⚠️ ЗАВЕРШЕНО С ОШИБКАМИ: {'; '.join(details)}.",
+                    "yellow",
+                )
+                self.on_status("Завершено с ошибками", 1.0)
+                return
+
             self.on_log("\n✅ ПЕРЕВОД УСПЕШНО ЗАВЕРШЕН!", "green")
             if options.output_mode == "resourcepack":
                 self.on_log("💡 Включите ресурспак и датапак в игре.", "yellow")

@@ -2,7 +2,7 @@ import requests
 
 from mineai.constants import KOBOLD_API
 from mineai.engines.http_retry import RequestCancelled, request_with_retry
-from mineai.engines.llm_common import BatchLlmEngine
+from mineai.engines.llm_v2 import BatchLlmEngine
 
 
 class KoboldEngine(BatchLlmEngine):

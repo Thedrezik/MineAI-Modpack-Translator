@@ -1,5 +1,6 @@
 from collections import Counter
 import re
+from typing import Callable
 from mineai.cache import TranslationCache
 from mineai.config import ConfigManager
 from mineai.constants import DEFAULT_OPENROUTER_MODEL
@@ -169,11 +170,17 @@ class TranslationService:
         *,
         context: str = "",
         prompt_type: str = "mods",
+        candidate_validator: Callable[[str, str], tuple[bool, str | None]] | None = None,
+        preserve_source_structure: bool = False,
     ) -> dict[str, str]:
         if not strings:
             return {}
 
-        smart_glue = self.config.getboolean("GENERAL", "smart_glue")
+        smart_glue = (
+            False
+            if preserve_source_structure
+            else self.config.getboolean("GENERAL", "smart_glue")
+        )
         result: dict[str, str] = {}
         pending: dict[str, EngineItem] = {}
         source_owner: dict[str, str] = {}
@@ -192,9 +199,38 @@ class TranslationService:
             if callbacks.on_metric:
                 callbacks.on_metric(name, n)
 
+        def validate_candidate(
+            owner_key: str,
+            item: EngineItem,
+            text: object,
+            *,
+            validation_keys: tuple[str, ...] | None = None,
+        ):
+            ok, reason, identity = _validate_candidate(item, text, target_lang)
+            if not ok:
+                return False, reason, identity
+            assert isinstance(text, str)
+            if candidate_validator is not None:
+                keys = validation_keys or (owner_key,)
+                for validation_key in keys:
+                    format_ok, format_reason = candidate_validator(validation_key, text)
+                    if not format_ok:
+                        return (
+                            False,
+                            format_reason or "нарушена структура формата",
+                            False,
+                        )
+            return True, None, identity
+
         def commit(owner_key: str, text: object, source_label: str) -> bool:
             item = pending[owner_key]
-            ok, reason, identity = _validate_candidate(item, text, target_lang)
+            output_keys = tuple(aliases[owner_key])
+            ok, reason, identity = validate_candidate(
+                owner_key,
+                item,
+                text,
+                validation_keys=output_keys,
+            )
             if not ok:
                 failure_reasons[owner_key] = f"{source_label}: {reason}"
                 preview = repr(text)[:120] if text is not None else "None"
@@ -204,7 +240,6 @@ class TranslationService:
                 )
                 return False
             assert isinstance(text, str)
-            output_keys = aliases[owner_key]
             for key in output_keys:
                 result[key] = text
             accepted.add(owner_key)
@@ -245,7 +280,7 @@ class TranslationService:
 
             hit, is_imported = self.cache.get(target_lang["api"], text)
             if hit is not None:
-                valid, reason, _id = _validate_candidate(item, hit, target_lang)
+                valid, reason, _id = validate_candidate(key, item, hit)
                 if valid:
                     result[key] = hit
                     if is_imported:

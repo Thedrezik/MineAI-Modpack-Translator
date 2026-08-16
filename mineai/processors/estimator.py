@@ -5,7 +5,6 @@ import zipfile
 
 from mineai.constants import (
     BOOK_PATH_MARKERS,
-    MD_PATH_MARKERS,
     RESEARCH_PATH_MARKERS,
 )
 from mineai.json_utils import load_lenient_json
@@ -13,6 +12,11 @@ from mineai.processors.bq_baseline import resolve_bq_force_baseline
 from mineai.processors.locale_keys import (
     collect_lang_keys_to_translate,
     count_translatable_lang_entries,
+)
+from mineai.processors.markdown_guides import (
+    get_markdown_target_path,
+    is_source_markdown_guide,
+    is_target_markdown_locale_path,
 )
 from mineai.processors.selection import (
     collect_book_json_selection,
@@ -113,6 +117,10 @@ class StringEstimator:
                     for item in archive.infolist()
                     if target_file in item.filename.lower()
                     or f"/{target_lang['file']}/" in item.filename.lower()
+                    or is_target_markdown_locale_path(
+                        item.filename,
+                        target_lang["file"],
+                    )
                 }
                 for item in archive.infolist():
                     file_lower = item.filename.lower()
@@ -130,17 +138,7 @@ class StringEstimator:
                             )
                         )
                     )
-                    is_book_md = (
-                        (
-                            file_lower.endswith(".md")
-                            or file_lower.endswith(".txt")
-                        )
-                        and "/en_us/" in file_lower
-                        and any(
-                            marker in file_lower
-                            for marker in MD_PATH_MARKERS
-                        )
-                    )
+                    is_book_md = is_source_markdown_guide(item.filename)
                     is_lang = (
                         file_lower.endswith("en_us.json")
                         and not is_book_json
@@ -278,11 +276,9 @@ class StringEstimator:
         except OSError:
             return 0
 
-        target_path = re.sub(
-            r"/en_us/",
-            f"/{target_lang['file']}/",
+        target_path = get_markdown_target_path(
             item.filename,
-            flags=re.IGNORECASE,
+            target_lang["file"],
         )
         target_text = ""
         target_key = target_path.lower()
