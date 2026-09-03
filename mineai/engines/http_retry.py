@@ -1,4 +1,4 @@
-"""Shared HTTP retry helpers for translation engines."""
+﻿"""Shared HTTP retry helpers for translation engines."""
 
 from collections.abc import Callable
 import logging
@@ -17,12 +17,16 @@ class RequestCancelled(Exception):
     """Raised when the active translation job is cancelled between HTTP attempts."""
 
 
-def _is_retryable(exc: requests.RequestException) -> bool:
+def _is_retryable(
+    exc: requests.RequestException,
+    *,
+    retry_429: bool = True,
+) -> bool:
     if isinstance(exc, (requests.Timeout, requests.ConnectionError)):
         return True
     if isinstance(exc, requests.HTTPError) and exc.response is not None:
         status_code = exc.response.status_code
-        return status_code == 429 or 500 <= status_code <= 599
+        return (retry_429 and status_code == 429) or 500 <= status_code <= 599
     return False
 
 
@@ -60,10 +64,13 @@ def request_with_retry(
     on_log: Callable[[str, str], None] | None = None,
     delay_func: Callable[[int, Exception], float] | None = None,
     should_continue: Callable[[], bool] | None = None,
+    retry_429: bool = True,
 ) -> requests.Response:
     """Execute an HTTP request with bounded, cancellation-aware backoff.
 
-    Timeouts, connection failures, HTTP 429 and HTTP 5xx responses are retried.
+    Timeouts, connection failures, HTTP 429 and HTTP 5xx responses are retried
+    by default. Callers that have another endpoint to try can disable 429
+    retries so a rate-limited host is abandoned immediately.
     Other HTTP and request errors are raised immediately. Cancellation is checked
     before every attempt and while waiting between retries.
     """
@@ -81,7 +88,7 @@ def request_with_retry(
         except RequestCancelled:
             raise
         except requests.RequestException as exc:
-            if not _is_retryable(exc) or attempt >= attempts:
+            if not _is_retryable(exc, retry_429=retry_429) or attempt >= attempts:
                 raise
 
             if delay_func:

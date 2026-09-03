@@ -1,4 +1,4 @@
-"""Reusable widgets for the Qt dashboard."""
+﻿"""Reusable widgets for the Qt dashboard."""
 
 from __future__ import annotations
 

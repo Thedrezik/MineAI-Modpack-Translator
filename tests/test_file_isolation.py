@@ -1,4 +1,4 @@
-import unittest
+﻿import unittest
 from unittest import mock
 
 from mineai.cache import TranslationCache
@@ -12,6 +12,16 @@ class _Config:
 
     def getboolean(self, _section, _key):
         return False
+
+    def getint(self, _section, _key, fallback=0):
+        return fallback
+
+
+class _RecoveryConfig(_Config):
+    def get(self, section, key):
+        if (section, key) == ("AI", "model_path"):
+            return "model.gguf"
+        return ""
 
 
 def _options(*, output_mode="inplace") -> TranslationOptions:
@@ -89,6 +99,7 @@ class FileIsolationTests(unittest.TestCase):
         writer = mock.Mock()
         writer.rp_zip_path = "/tmp/rp.zip"
         writer.dp_zip_path = "/tmp/dp.zip"
+        writer.close.return_value = (None, None)
 
         with (
             mock.patch("mineai.runtime.job.discover_jar_files", return_value=[]),
@@ -131,6 +142,64 @@ class FileIsolationTests(unittest.TestCase):
         self.assertTrue(any("Не удалось сохранить кэш" in message for message in logs))
         self.assertFalse(any("УСПЕШНО ЗАВЕРШЕН" in message for message in logs))
         self.assertEqual(statuses[-1], ("Ошибка перевода", 1.0))
+
+    def test_cache_recovery_forces_full_processing_and_layers_both_caches(self):
+        state = JobState(is_running=True)
+        logs = []
+        statuses = []
+        cache_std = mock.Mock(spec=TranslationCache)
+        cache_ai = mock.Mock(spec=TranslationCache)
+        job = TranslationJob(
+            _RecoveryConfig(),
+            cache_std,
+            cache_ai,
+            state,
+            on_log=lambda message, _tag: logs.append(message),
+            on_status=lambda *args: statuses.append(args),
+            on_row=lambda *_args: None,
+        )
+        options = _options()
+        options.engine = "ai"
+        options.ai_provider = "local"
+        options.process_mode = "skip"
+        options.cache_recovery_mode = True
+        loose_processor = mock.Mock()
+        service = mock.Mock()
+
+        with (
+            mock.patch("mineai.runtime.job.discover_jar_files", return_value=[]),
+            mock.patch(
+                "mineai.runtime.job.discover_loose_lang_files",
+                return_value=["example.json"],
+            ),
+            mock.patch("mineai.runtime.job.StringEstimator") as estimator_cls,
+            mock.patch(
+                "mineai.runtime.job.TranslationService",
+                return_value=service,
+            ) as service_cls,
+            mock.patch("mineai.runtime.job.JarProcessor"),
+            mock.patch(
+                "mineai.runtime.job.LooseJsonProcessor",
+                return_value=loose_processor,
+            ),
+            mock.patch("mineai.runtime.job.SnbtProcessor"),
+            mock.patch("mineai.runtime.job.BQProcessor"),
+            mock.patch("mineai.runtime.job.HeraclesProcessor"),
+            mock.patch.object(job.ai_launcher, "ensure_running", return_value=True),
+        ):
+            estimator_cls.return_value.estimate.return_value = 1
+            job.run_translation(options)
+
+        self.assertEqual(estimator_cls.return_value.estimate.call_args.kwargs["mode"], "force")
+        self.assertEqual(loose_processor.process.call_args.kwargs["mode"], "force")
+        self.assertIs(service_cls.call_args.args[1], cache_ai)
+        self.assertEqual(
+            service_cls.call_args.kwargs["fallback_caches"],
+            [("Google-кэш", cache_std)],
+        )
+        self.assertTrue(service_cls.call_args.kwargs["force_google_fallback"])
+        cache_ai.save.assert_called_once_with()
+        cache_std.save.assert_called_once_with()
 
 
 if __name__ == "__main__":

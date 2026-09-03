@@ -1,4 +1,4 @@
-"""Hash-verified BetterQuesting baselines for safe in-place Force mode."""
+﻿"""Hash-verified BetterQuesting baselines for safe in-place Force mode."""
 
 from __future__ import annotations
 

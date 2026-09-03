@@ -1,5 +1,8 @@
-from collections import Counter
+﻿from collections import Counter
+from collections.abc import Callable
 import re
+import requests
+from formatkit.contracts import ANCHOR_PATTERN
 from mineai.cache import TranslationCache
 from mineai.config import ConfigManager
 from mineai.constants import DEFAULT_OPENROUTER_MODEL
@@ -7,16 +10,34 @@ from mineai.engines.base import EngineCallbacks, EngineItem, TranslationEngine
 from mineai.engines.deepl import DeepLEngine
 from mineai.engines.google import GoogleEngine
 from mineai.engines.kobold import KoboldEngine
+from mineai.engines.llama import LlamaEngine
+from mineai.engines.lmstudio import LmStudioEngine
+from mineai.engines.ollama import OllamaEngine
 from mineai.engines.openrouter import OpenRouterEngine
+from mineai.formats.rich_text import (
+    contains_unsafe_formatting,
+    parse_rich_text,
+)
 from mineai.language_validation import (
+    delimiter_counts_need_repair,
+    formatting_boundaries_need_repair,
+    has_long_untranslated_english_fragment,
+    has_untranslated_leading_article,
+    has_untranslated_source_words,
     requires_target_script_marker,
     uses_same_latin_script,
 )
 from mineai.text_processing import (
     PLACEHOLDER_PATTERN,
     apply_smart_glue,
+    count_line_breaks,
+    is_article_removed_technical_translation,
+    is_nontranslatable_value,
     is_technical_term,
     mask_protected_fragments,
+    numeric_fragments,
+    structural_fragments,
+    translation_length_issue,
 )
 
 _CJK_PATTERN = re.compile(
@@ -35,14 +56,16 @@ def _source_fingerprint(text: str) -> str:
     return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
-def _count_fragment(text: str, fragment: str) -> int:
-    """Считает вхождения фрагмента; буквенные фрагменты (II, III, RF...) —
-    с границами слова, чтобы 'II' не находился внутри 'III'."""
+def _scoped_cache_source(text: str, scope: str) -> str:
+    if not scope:
+        return text
+    return f"␞{scope}␟{text}"
+
+
+def _fragment_pattern(fragment: str) -> str:
     if re.fullmatch(r"[A-Za-z]{1,4}", fragment):
-        pattern = r"(?<![A-Za-z])" + re.escape(fragment) + r"(?![A-Za-z])"
-    else:
-        pattern = re.escape(fragment)
-    return len(re.findall(pattern, text))
+        return r"(?<![A-Za-z])" + re.escape(fragment) + r"(?![A-Za-z])"
+    return re.escape(fragment)
 
 
 def _can_cache_identity(original: str) -> bool:
@@ -59,6 +82,87 @@ def _can_cache_identity(original: str) -> bool:
     return False
 
 
+def _is_protected_only_localization(item: EngineItem, candidate: str) -> bool:
+    """Allow labels such as ``The UI`` -> ``UI`` after article removal."""
+    if not item.mapping:
+        return False
+    source_visible = PLACEHOLDER_PATTERN.sub(" ", item.masked)
+    source_visible = re.sub(
+        r"\b(?:a|an|the)\b",
+        " ",
+        source_visible,
+        flags=re.IGNORECASE,
+    )
+    source_visible = re.sub(r"\b\d+\s*[x×]\b", " ", source_visible, flags=re.IGNORECASE)
+    if re.search(r"[A-Za-z]", source_visible):
+        return False
+
+    candidate_visible = candidate
+    for fragment in sorted(
+        set(item.mapping.values()),
+        key=lambda value: (-len(value), value),
+    ):
+        candidate_visible = re.sub(
+            _fragment_pattern(fragment),
+            " ",
+            candidate_visible,
+        )
+    candidate_visible = re.sub(
+        r"\b\d+\s*[x×]\b", " ", candidate_visible, flags=re.IGNORECASE
+    )
+    return not re.search(r"[A-Za-z]", candidate_visible)
+
+
+def _is_russian_article_punctuation_localization(
+    original: str,
+    candidate: str,
+    target_lang: dict,
+) -> bool:
+    """Allow English articles to disappear before immutable game terms."""
+    if target_lang.get("api") != "ru":
+        return False
+    if not candidate.strip():
+        return False
+    source_remainder = re.sub(
+        r"\b(?:a|an|the)\b",
+        "",
+        original,
+        flags=re.IGNORECASE,
+    )
+    if re.search(r"[A-Za-z0-9]", source_remainder):
+        return False
+    return not re.search(r"[A-Za-z0-9]", candidate)
+
+
+def _split_fallback_text(text: str, max_chars: int = 480) -> list[str]:
+    """Split failed prose into exact, reasonably sized sentence chunks."""
+    if len(text) <= max_chars:
+        return [text]
+
+    chunks: list[str] = []
+    cursor = 0
+    minimum = max_chars // 3
+    while len(text) - cursor > max_chars:
+        window = text[cursor : cursor + max_chars + 1]
+        boundaries = list(
+            re.finditer(r"(?<=[.!?;:])\s+|,\s+", window)
+        )
+        usable = [match.end() for match in boundaries if match.end() >= minimum]
+        if usable:
+            cut = usable[-1]
+        else:
+            whitespace = [
+                match.end()
+                for match in re.finditer(r"\s+", window)
+                if match.end() >= minimum
+            ]
+            cut = whitespace[-1] if whitespace else max_chars
+        chunks.append(text[cursor : cursor + cut])
+        cursor += cut
+    chunks.append(text[cursor:])
+    return chunks
+
+
 def _validate_candidate(
     item: EngineItem,
     candidate: object,
@@ -68,13 +172,35 @@ def _validate_candidate(
     if not isinstance(candidate, str):
         return False, "ответ не является строкой", False
     if not candidate.strip():
+        if _is_russian_article_punctuation_localization(
+            item.original,
+            candidate,
+            target_lang,
+        ):
+            return True, None, False
         return False, "получена пустая строка", False
     lowered = candidate.casefold()
     for marker in _PROMPT_LEAK_MARKERS:
         if marker in lowered:
             return False, f"эхо промпта: {marker}", False
-    for fragment, expected_count in Counter(item.mapping.values()).items():
-        actual_count = _count_fragment(candidate, fragment)
+    original_breaks = count_line_breaks(item.original)
+    candidate_breaks = count_line_breaks(candidate)
+    if candidate_breaks != original_breaks:
+        return (
+            False,
+            "изменено количество переносов строк: "
+            f"{original_breaks} -> {candidate_breaks}",
+            False,
+        )
+    if numeric_fragments(candidate) != numeric_fragments(item.original):
+        return False, "изменены числовые значения", False
+    expected_sequence = tuple(item.mapping.values())
+    expected_fragments = Counter(expected_sequence)
+    _candidate_masked, candidate_mapping = mask_protected_fragments(candidate)
+    candidate_sequence = tuple(candidate_mapping.values())
+    actual_fragments = Counter(candidate_sequence)
+    for fragment, expected_count in expected_fragments.items():
+        actual_count = actual_fragments[fragment]
         if actual_count != expected_count:
             return (
                 False,
@@ -82,21 +208,57 @@ def _validate_candidate(
                 f"ожидалось {expected_count}, получено {actual_count}",
                 False,
             )
-    if Counter(PLACEHOLDER_PATTERN.findall(candidate)) != Counter(
-        PLACEHOLDER_PATTERN.findall(item.original)
+    relevant_sequence = tuple(
+        fragment for fragment in candidate_sequence if fragment in expected_fragments
+    )
+    if relevant_sequence != expected_sequence:
+        return False, "изменён порядок защищённых фрагментов", False
+    if structural_fragments(candidate) != structural_fragments(item.original):
+        return False, "изменён порядок или набор кодов форматирования", False
+    if formatting_boundaries_need_repair(item.original, candidate):
+        return False, "изменены пробелы вокруг кодов форматирования", False
+    if delimiter_counts_need_repair(item.original, candidate):
+        return False, "изменено количество структурных разделителей", False
+    if PLACEHOLDER_PATTERN.findall(candidate) != PLACEHOLDER_PATTERN.findall(
+        item.original
     ):
         return False, "изменены маркеры [#N#]", False
+    length_issue = translation_length_issue(item.original, candidate)
+    if length_issue:
+        return False, length_issue, False
+    if has_untranslated_leading_article(item.original, candidate, target_lang):
+        return False, "оставлен английский артикль в начале строки", False
+    if has_long_untranslated_english_fragment(_candidate_masked, target_lang):
+        return False, "оставлен длинный английский фрагмент", False
+    if has_untranslated_source_words(item.masked, _candidate_masked, target_lang):
+        return False, "оставлены английские слова исходной строки", False
     same_as_source = candidate.strip() == item.original.strip()
     if same_as_source:
         if target_lang["api"] == "en":
             return True, None, False
+        if _is_protected_only_localization(item, candidate):
+            return True, None, True
         if _can_cache_identity(item.original):
             return True, None, True
         return False, "ответ совпадает с оригиналом", False
+    if is_article_removed_technical_translation(
+        item.original,
+        candidate,
+        target_lang.get("api", ""),
+    ):
+        return True, None, False
     if (
         requires_target_script_marker(target_lang)
         and not re.search(target_lang["regex"], candidate)
     ):
+        if _is_russian_article_punctuation_localization(
+            item.original,
+            candidate,
+            target_lang,
+        ):
+            return True, None, False
+        if _is_protected_only_localization(item, candidate):
+            return True, None, False
         return False, "нет символов целевого языка", False
     if uses_same_latin_script(target_lang) and _CJK_PATTERN.search(candidate):
         return False, "CJK-символы в латинском переводе", False
@@ -118,6 +280,8 @@ class TranslationService:
         ai_mode: str = "safe",
         ai_batch: int = 20,
         ai_provider: str = "local",
+        fallback_caches: list[tuple[str, TranslationCache]] | None = None,
+        force_google_fallback: bool = False,
     ) -> None:
         self.engine_name = engine_name
         self.cache = cache
@@ -126,6 +290,9 @@ class TranslationService:
         self.ai_mode = ai_mode
         self.ai_batch = ai_batch
         self.ai_provider = ai_provider
+        self.fallback_caches = list(fallback_caches or ())
+        self.force_google_fallback = force_google_fallback
+        self._ai_http_session = requests.Session() if engine_name == "ai" else None
 
     def _build_engine(
         self, context: str = "", prompt_type: str = "mods"
@@ -154,11 +321,56 @@ class TranslationService:
                 site_url=self.config.get("OPENROUTER", "site_url"),
                 app_name=self.config.get("OPENROUTER", "app_name"),
             )
+        if self.ai_provider == "lmstudio":
+            return LmStudioEngine(
+                base_url=self.config.get("LMSTUDIO", "base_url"),
+                api_key=self.config.get("LMSTUDIO", "api_key"),
+                model=self.config.get("LMSTUDIO", "model"),
+                mode=self.ai_mode,
+                context=context,
+                prompt_type=prompt_type,
+                retries=retries,
+                session=self._ai_http_session,
+            )
+        if self.ai_provider == "ollama":
+            return OllamaEngine(
+                base_url=self.config.get("OLLAMA", "base_url"),
+                api_key=self.config.get("OLLAMA", "api_key"),
+                model=self.config.get("OLLAMA", "model"),
+                mode=self.ai_mode,
+                context=context,
+                prompt_type=prompt_type,
+                retries=retries,
+                session=self._ai_http_session,
+            )
+        if self.ai_provider == "llama":
+            return LlamaEngine(
+                base_url=self.config.get("LLAMA", "base_url"),
+                api_key=self.config.get("LLAMA", "api_key"),
+                model=self.config.get("LLAMA", "model"),
+                mode=self.ai_mode,
+                context=context,
+                prompt_type=prompt_type,
+                retries=retries,
+                session=self._ai_http_session,
+            )
         return KoboldEngine(
             mode=self.ai_mode,
             context=context,
             prompt_type=prompt_type,
             retries=retries,
+            session=self._ai_http_session,
+        )
+
+    def discard_cached_translation(
+        self,
+        api_code: str,
+        source_text: str,
+        scope: str = "",
+    ) -> None:
+        self.cache.discard(
+            api_code,
+            _scoped_cache_source(source_text, scope),
         )
 
     def translate_dict(
@@ -169,6 +381,11 @@ class TranslationService:
         *,
         context: str = "",
         prompt_type: str = "mods",
+        cache_contexts: dict[str, str] | None = None,
+        candidate_validators: dict[
+            str,
+            Callable[[str], str | None],
+        ] | None = None,
     ) -> dict[str, str]:
         if not strings:
             return {}
@@ -180,9 +397,37 @@ class TranslationService:
         aliases: dict[str, list[str]] = {}
         accepted: set[str] = set()
         failure_reasons: dict[str, str] = {}
+        cache_sources: dict[str, str] = {}
         cached_count = 0
         imported_count = 0
         deduplicated_count = 0
+        repaired_cache_count = 0
+        repaired_caches: set[TranslationCache] = set()
+        fallback_cache_hits: dict[str, int] = {}
+
+        def cache_layers():
+            yield "", self.cache
+            yield from self.fallback_caches
+
+        def validate(
+            owner_key: str,
+            item: EngineItem,
+            candidate: object,
+        ) -> tuple[bool, str | None, bool]:
+            ok, reason, identity = _validate_candidate(
+                item,
+                candidate,
+                target_lang,
+            )
+            if not ok or not isinstance(candidate, str):
+                return ok, reason, identity
+            validator = (candidate_validators or {}).get(owner_key)
+            if validator is None:
+                return ok, reason, identity
+            format_reason = validator(candidate)
+            if format_reason:
+                return False, format_reason, False
+            return True, None, identity
 
         def bump(n: int = 1) -> None:
             if callbacks.on_progress:
@@ -194,12 +439,13 @@ class TranslationService:
 
         def commit(owner_key: str, text: object, source_label: str) -> bool:
             item = pending[owner_key]
-            ok, reason, identity = _validate_candidate(item, text, target_lang)
+            ok, reason, identity = validate(owner_key, item, text)
             if not ok:
                 failure_reasons[owner_key] = f"{source_label}: {reason}"
-                preview = repr(text)[:120] if text is not None else "None"
+                candidate_text = repr(text) if text is not None else "None"
                 callbacks.on_log(
-                    f"❌ Отклонён {item.original[:70]!r}: {reason}; ответ={preview}",
+                    f"❌ Отклонён {item.original!r}: {reason}; "
+                    f"ответ={candidate_text}",
                     "red",
                 )
                 return False
@@ -208,11 +454,12 @@ class TranslationService:
             for key in output_keys:
                 result[key] = text
             accepted.add(owner_key)
+            cache_source = cache_sources[owner_key]
             if identity:
-                self.cache.set_identity(target_lang["api"], item.original)
+                self.cache.set_identity(target_lang["api"], cache_source)
                 metric("protected", len(output_keys))
             else:
-                self.cache.set(target_lang["api"], item.original, text)
+                self.cache.set(target_lang["api"], cache_source, text)
                 metric("ok", len(output_keys))
                 if "Google" in source_label:
                     metric("fallback", len(output_keys))
@@ -240,29 +487,103 @@ class TranslationService:
             callbacks.wait_if_paused()
             if smart_glue:
                 text = apply_smart_glue(text)
+            if is_technical_term(text) or is_nontranslatable_value(text):
+                technical_cache_source = _scoped_cache_source(
+                    text,
+                    (cache_contexts or {}).get(key, ""),
+                )
+                hit = None
+                is_imported = False
+                cache_label = ""
+                hit_cache = self.cache
+                for candidate_label, candidate_cache in cache_layers():
+                    hit, is_imported = candidate_cache.get(
+                        target_lang["api"],
+                        technical_cache_source,
+                    )
+                    if hit is not None:
+                        cache_label = candidate_label
+                        hit_cache = candidate_cache
+                        break
+                result[key] = text
+                if hit is not None:
+                    if is_imported:
+                        imported_count += 1
+                    elif hit_cache is not self.cache:
+                        fallback_cache_hits[cache_label] = (
+                            fallback_cache_hits.get(cache_label, 0) + 1
+                        )
+                    else:
+                        cached_count += 1
+                    if hit_cache is not self.cache:
+                        self.cache.set_identity(
+                            target_lang["api"],
+                            technical_cache_source,
+                        )
+                    metric("ok")
+                    metric("cached")
+                else:
+                    self.cache.set_identity(
+                        target_lang["api"],
+                        technical_cache_source,
+                    )
+                    metric("protected")
+                bump()
+                continue
             masked, mapping = mask_protected_fragments(text)
             item = EngineItem(key=key, original=text, masked=masked, mapping=mapping)
+            cache_source = _scoped_cache_source(
+                text,
+                (cache_contexts or {}).get(key, ""),
+            )
 
-            hit, is_imported = self.cache.get(target_lang["api"], text)
-            if hit is not None:
-                valid, reason, _id = _validate_candidate(item, hit, target_lang)
+            cache_accepted = False
+            for cache_label, candidate_cache in cache_layers():
+                hit, is_imported = candidate_cache.get(
+                    target_lang["api"],
+                    cache_source,
+                )
+                if hit is None:
+                    continue
+                valid, reason, identity = validate(key, item, hit)
                 if valid:
                     result[key] = hit
                     if is_imported:
                         imported_count += 1
+                    elif candidate_cache is not self.cache:
+                        fallback_cache_hits[cache_label] = (
+                            fallback_cache_hits.get(cache_label, 0) + 1
+                        )
                     else:
                         cached_count += 1
+                    if candidate_cache is not self.cache:
+                        if identity:
+                            self.cache.set_identity(
+                                target_lang["api"], cache_source
+                            )
+                        else:
+                            self.cache.set(
+                                target_lang["api"], cache_source, hit
+                            )
                     bump()
                     metric("ok")
                     metric("cached")
-                    continue
+                    cache_accepted = True
+                    break
                 callbacks.on_log(
-                    f"⚠️ Запись кэша отброшена для {text[:70]!r}: {reason}",
+                    f"⚠️ Запись {cache_label or 'кэша'} отброшена "
+                    f"для {text!r}: {reason}",
                     "yellow",
                 )
-                self.cache.discard(
-                    target_lang["api"], text, include_imported=is_imported
+                candidate_cache.discard(
+                    target_lang["api"],
+                    cache_source,
+                    include_imported=is_imported,
                 )
+                repaired_caches.add(candidate_cache)
+                repaired_cache_count += 1
+            if cache_accepted:
+                continue
 
             if not masked:
                 result[key] = text
@@ -270,7 +591,7 @@ class TranslationService:
                 metric("protected")
                 continue
 
-            fp = _source_fingerprint(text)
+            fp = _source_fingerprint(cache_source)
             owner = source_owner.get(fp)
             if owner is not None:
                 aliases[owner].append(key)
@@ -279,11 +600,14 @@ class TranslationService:
             source_owner[fp] = key
             aliases[key] = [key]
             pending[key] = item
+            cache_sources[key] = cache_source
 
         if cached_count:
             callbacks.on_log(f"   🗃️ Из кэша: {cached_count}", "gray")
         if imported_count:
             callbacks.on_log(f"   📦 Из ресурс-паков: {imported_count}", "cyan")
+        for cache_label, count in fallback_cache_hits.items():
+            callbacks.on_log(f"   🗃️ Из {cache_label}: {count}", "gray")
         if deduplicated_count:
             callbacks.on_log(
                 f"   ♻️ Дедупликация, объединены: {deduplicated_count}", "dim"
@@ -301,13 +625,28 @@ class TranslationService:
         cur: dict[str, EngineItem] = {}
         cur_chars = 0
         cur_ph = 0
+        cur_format_sensitive = False
         for key, item in pending.items():
             tlen = len(item.masked)
             ph = len(PLACEHOLDER_PATTERN.findall(item.masked))
+            format_sensitive = bool(
+                key in (candidate_validators or {})
+                and ANCHOR_PATTERN.search(item.original)
+            )
+            next_limit = (
+                5
+                if cur_format_sensitive or format_sensitive
+                else (self.ai_batch if is_ai else 50)
+            )
+            if cur and len(cur) >= next_limit:
+                batches.append(cur)
+                cur, cur_chars, cur_ph = {}, 0, 0
+                cur_format_sensitive = False
             if is_ai and (ph > 15 or tlen > 800):
                 if cur:
                     batches.append(cur)
                     cur, cur_chars, cur_ph = {}, 0, 0
+                    cur_format_sensitive = False
                 batches.append({key: item})
                 continue
             if is_ai and cur and (
@@ -315,14 +654,20 @@ class TranslationService:
             ):
                 batches.append(cur)
                 cur, cur_chars, cur_ph = {}, 0, 0
+                cur_format_sensitive = False
             cur[key] = item
             cur_chars += tlen
             cur_ph += ph
-            if (not is_ai and len(cur) >= 50) or (
-                is_ai and len(cur) >= self.ai_batch
-            ):
+            cur_format_sensitive = cur_format_sensitive or format_sensitive
+            active_limit = (
+                5
+                if cur_format_sensitive
+                else (self.ai_batch if is_ai else 50)
+            )
+            if len(cur) >= active_limit:
                 batches.append(cur)
                 cur, cur_chars, cur_ph = {}, 0, 0
+                cur_format_sensitive = False
         if cur:
             batches.append(cur)
 
@@ -336,9 +681,132 @@ class TranslationService:
             batch_result = engine.translate_batch(batch, target_lang, callbacks)
             apply_engine_result(batch, batch_result, "основной движок")
 
+        identity_failed = {
+            key: item
+            for key, item in pending.items()
+            if key not in accepted
+            and "ответ совпадает с оригиналом" in failure_reasons.get(key, "")
+        }
+        if identity_failed and callbacks.should_run():
+            callbacks.on_log(
+                f"🔁 Строгий повтор названий: {len(identity_failed)}",
+                "cyan",
+            )
+            retry_context = (
+                f"{context}\n"
+                "These are translatable Minecraft names or titles. Translate "
+                "every English name into the target language; do not return "
+                "the original English text."
+            ).strip()
+            retry_engine = (
+                GoogleEngine(
+                    workers=self.config.getint("GENERAL", "google_workers", 5),
+                    mode="single",
+                )
+                if self.engine_name == "google"
+                else self._build_engine(retry_context, prompt_type)
+            )
+            retry_result = retry_engine.translate_batch(
+                identity_failed,
+                target_lang,
+                callbacks,
+            )
+            apply_engine_result(
+                identity_failed,
+                retry_result,
+                "строгий повтор",
+            )
+
+        format_failed = {
+            key: item
+            for key, item in pending.items()
+            if key not in accepted
+            and "FormatKit:" in failure_reasons.get(key, "")
+        }
+        if format_failed and callbacks.should_run():
+            callbacks.on_log(
+                f"🔁 Строгий повтор структуры: {len(format_failed)}",
+                "cyan",
+            )
+            retry_context = (
+                f"{context}\n"
+                "Every [#N#] marker is a fixed boundary. Keep every marker "
+                "in its original position relative to the translated words; "
+                "never move visible text across a marker."
+            ).strip()
+            retry_engine = (
+                GoogleEngine(
+                    workers=self.config.getint("GENERAL", "google_workers", 5),
+                    mode="single",
+                )
+                if self.engine_name == "google"
+                else self._build_engine(retry_context, prompt_type)
+            )
+            retry_result = retry_engine.translate_batch(
+                format_failed,
+                target_lang,
+                callbacks,
+            )
+            apply_engine_result(
+                format_failed,
+                retry_result,
+                "строгий повтор структуры",
+            )
+
+        # A model can return valid syntax and a target-language sentence while
+        # silently copying one visible English term (for example ``Blaze`` or
+        # ``Deployer``). Retry that content explicitly before Google fallback.
+        residual_failed = {
+            key: item
+            for key, item in pending.items()
+            if key not in accepted
+            and any(
+                marker in failure_reasons.get(key, "")
+                for marker in (
+                    "оставлены английские слова",
+                    "оставлен длинный английский фрагмент",
+                    "нет символов целевого языка",
+                    "оставлен английский артикль",
+                )
+            )
+        }
+        if residual_failed and callbacks.should_run():
+            callbacks.on_log(
+                f"🔁 Строгий повтор текста: {len(residual_failed)} строк",
+                "cyan",
+            )
+            retry_context = (
+                f"{context}\n"
+                "The previous answer left visible source-language words. "
+                "Translate every ordinary English word and proper name in the "
+                "visible text. Keep only protected game terms and placeholders "
+                "unchanged; never leave an English word inside an otherwise "
+                "translated sentence."
+            ).strip()
+            retry_engine = (
+                GoogleEngine(
+                    workers=self.config.getint("GENERAL", "google_workers", 5),
+                    mode="single",
+                )
+                if self.engine_name == "google"
+                else self._build_engine(retry_context, prompt_type)
+            )
+            retry_result = retry_engine.translate_batch(
+                residual_failed,
+                target_lang,
+                callbacks,
+            )
+            apply_engine_result(
+                residual_failed,
+                retry_result,
+                "строгий повтор текста",
+            )
+
         failed_pending = {k: v for k, v in pending.items() if k not in accepted}
         try:
-            use_fallback = self.config.getboolean("AI", "fallback_google")
+            use_fallback = self.force_google_fallback or self.config.getboolean(
+                "AI", "fallback_google"
+            )
         except Exception:
             use_fallback = False
 
@@ -382,6 +850,111 @@ class TranslationService:
                 gr = gf.translate_batch(complex_failed, target_lang, callbacks)
                 apply_engine_result(complex_failed, gr, "Google complex fallback")
 
+        segmented_failed = {
+            key: item
+            for key, item in pending.items()
+            if key not in accepted
+            and key in (candidate_validators or {})
+            and (
+                ANCHOR_PATTERN.search(item.original)
+                or len(item.original) > 240
+            )
+        }
+        if segmented_failed and callbacks.should_run():
+            segment_items: dict[str, EngineItem] = {}
+            segment_layouts: dict[str, list[str]] = {}
+            required_segments: dict[str, set[str]] = {}
+            for owner_key, owner_item in segmented_failed.items():
+                anchor_parts = re.split(
+                    f"({ANCHOR_PATTERN.pattern})",
+                    owner_item.original,
+                )
+                parts: list[str] = []
+                for part in anchor_parts:
+                    if ANCHOR_PATTERN.fullmatch(part):
+                        parts.append(part)
+                    else:
+                        parts.extend(_split_fallback_text(part))
+                segment_layouts[owner_key] = parts
+                required_segments[owner_key] = set()
+                for index, part in enumerate(parts):
+                    if not part or ANCHOR_PATTERN.fullmatch(part):
+                        continue
+                    leading = part[: len(part) - len(part.lstrip())]
+                    trailing = part[len(part.rstrip()) :]
+                    end = len(part) - len(trailing) if trailing else len(part)
+                    core = part[len(leading) : end]
+                    if not re.search(r"[A-Za-z]", core) or is_technical_term(core):
+                        continue
+                    masked, mapping = mask_protected_fragments(core)
+                    segment_key = f"{owner_key}::segment::{index}"
+                    segment_items[segment_key] = EngineItem(
+                        key=segment_key,
+                        original=core,
+                        masked=masked,
+                        mapping=mapping,
+                    )
+                    required_segments[owner_key].add(segment_key)
+
+            if segment_items:
+                callbacks.on_log(
+                    "🧩 Детерминированный fallback: "
+                    f"{len(segmented_failed)} блоков / "
+                    f"{len(segment_items)} текстовых сегментов",
+                    "cyan",
+                )
+                segment_engine = (
+                    GoogleEngine(
+                        workers=self.config.getint(
+                            "GENERAL",
+                            "google_workers",
+                            5,
+                        ),
+                        mode="single",
+                    )
+                    if self.engine_name == "google" or (is_ai and use_fallback)
+                    else self._build_engine(
+                        f"{context}\nTranslate each visible text segment.",
+                        prompt_type,
+                    )
+                )
+                segment_result = segment_engine.translate_batch(
+                    segment_items,
+                    target_lang,
+                    callbacks,
+                )
+                valid_segments: dict[str, str] = {}
+                for segment_key, candidate in segment_result.items():
+                    segment_item = segment_items.get(segment_key)
+                    if segment_item is None:
+                        continue
+                    ok, _reason, _identity = _validate_candidate(
+                        segment_item,
+                        candidate,
+                        target_lang,
+                    )
+                    if ok:
+                        valid_segments[segment_key] = candidate
+
+                for owner_key, parts in segment_layouts.items():
+                    if not required_segments[owner_key].issubset(valid_segments):
+                        continue
+                    for segment_key in required_segments[owner_key]:
+                        index = int(segment_key.rsplit("::", 1)[1])
+                        original_part = parts[index]
+                        leading = original_part[
+                            : len(original_part) - len(original_part.lstrip())
+                        ]
+                        trailing = original_part[len(original_part.rstrip()) :]
+                        parts[index] = (
+                            leading + valid_segments[segment_key] + trailing
+                        )
+                    commit(
+                        owner_key,
+                        "".join(parts),
+                        "сегментный fallback",
+                    )
+
         for owner_key, item in pending.items():
             if owner_key in accepted:
                 continue
@@ -395,11 +968,124 @@ class TranslationService:
                 
             reason = failure_reasons.get(owner_key, "нет результата")
             callbacks.on_log(
-                f"⚠️ Строка не переведена: {item.original[:90]!r}; {reason}",
+                f"⚠️ Строка не переведена: {item.original!r}; {reason}",
                 "yellow",
             )
             bump(len(output_keys))
             metric("failed", len(output_keys))
 
-        self.cache.save_if_threshold()
+        if repaired_cache_count:
+            for repaired_cache in repaired_caches:
+                repaired_cache.save()
+            if self.cache not in repaired_caches:
+                self.cache.save_if_threshold()
+            callbacks.on_log(
+                "🧹 Кэш автоматически исправлен: "
+                f"{repaired_cache_count} некорректных записей",
+                "yellow",
+            )
+        else:
+            self.cache.save_if_threshold()
+        return result
+
+    def translate_formatted_dict(
+        self,
+        strings: dict[str, str],
+        target_lang: dict,
+        callbacks: EngineCallbacks,
+        *,
+        context: str = "",
+        prompt_type: str = "books",
+    ) -> dict[str, str]:
+        """Translate prose nodes while reconstructing all syntax from source."""
+        if not strings:
+            return {}
+
+        templates = {
+            key: parse_rich_text(value)
+            for key, value in strings.items()
+        }
+        flat: dict[str, str] = {}
+        cache_contexts: dict[str, str] = {}
+        part_refs: dict[str, tuple[str, int]] = {}
+
+        for key, template in templates.items():
+            for part in template.translatable_parts():
+                if not re.search(r"[A-Za-z]", part.text):
+                    continue
+                part_key = f"{key}::part::{part.index}"
+                flat[part_key] = part.text
+                cache_contexts[part_key] = (
+                    f"{context}|{key}|text-part-{part.index}"
+                )
+                part_refs[part_key] = (key, part.index)
+
+        inner_callbacks = EngineCallbacks(
+            should_run=callbacks.should_run,
+            wait_if_paused=callbacks.wait_if_paused,
+            on_log=callbacks.on_log,
+            on_status=callbacks.on_status,
+            on_progress=None,
+            on_metric=None,
+        )
+        translated = self.translate_dict(
+            flat,
+            target_lang,
+            inner_callbacks,
+            context=context,
+            prompt_type=prompt_type,
+            cache_contexts=cache_contexts,
+            candidate_validators={
+                key: lambda candidate: (
+                    "FormatKit: translated prose introduced formatting syntax"
+                    if contains_unsafe_formatting(candidate)
+                    else None
+                )
+                for key in flat
+            },
+        )
+
+        failed_roots: set[str] = set()
+        result: dict[str, str] = {}
+        translated_parts: dict[str, dict[int, str]] = {
+            key: {} for key in strings
+        }
+        for part_key, (root_key, part_index) in part_refs.items():
+            source_part = flat[part_key]
+            candidate = translated.get(part_key, source_part)
+            if contains_unsafe_formatting(candidate):
+                callbacks.on_log(
+                    f"⚠️ Форматирование в текстовом узле {part_key!r} "
+                    "отклонено; исходная разметка сохранена",
+                    "yellow",
+                )
+                self.cache.discard(
+                    target_lang["api"],
+                    _scoped_cache_source(
+                        source_part,
+                        cache_contexts[part_key],
+                    ),
+                )
+                candidate = source_part
+            translated_parts[root_key][part_index] = candidate
+            if (
+                candidate == source_part
+                and not is_technical_term(source_part)
+                and not is_nontranslatable_value(source_part)
+            ):
+                failed_roots.add(root_key)
+
+        for key, source in strings.items():
+            result[key] = templates[key].render(translated_parts[key])
+            if not callbacks.should_run():
+                continue
+            if callbacks.on_progress:
+                callbacks.on_progress(1)
+            if callbacks.on_metric:
+                if not translated_parts[key]:
+                    callbacks.on_metric("protected", 1)
+                elif key in failed_roots:
+                    callbacks.on_metric("failed", 1)
+                else:
+                    callbacks.on_metric("ok", 1)
         return result

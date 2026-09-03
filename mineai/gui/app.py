@@ -1,4 +1,4 @@
-import ctypes
+﻿import ctypes
 import os
 from pathlib import Path
 import queue
@@ -197,6 +197,9 @@ class TranslatorApp(ctk.CTk):
         self.frame_ai = ctk.CTkFrame(body, fg_color="transparent")
         ctk.CTkLabel(self.frame_ai, text="Провайдер", anchor="w", font=("Segoe UI", 10, "bold"), text_color=UI.MUTED).pack(fill="x", pady=(2, 2))
         ctk.CTkRadioButton(self.frame_ai, text="Локальный KoboldCPP", variable=self.var_ai_provider, value="local", command=self._update_engine_ui).pack(anchor="w", pady=2)
+        ctk.CTkRadioButton(self.frame_ai, text="LM Studio", variable=self.var_ai_provider, value="lmstudio", command=self._update_engine_ui).pack(anchor="w", pady=2)
+        ctk.CTkRadioButton(self.frame_ai, text="Ollama", variable=self.var_ai_provider, value="ollama", command=self._update_engine_ui).pack(anchor="w", pady=2)
+        ctk.CTkRadioButton(self.frame_ai, text="Llama", variable=self.var_ai_provider, value="llama", command=self._update_engine_ui).pack(anchor="w", pady=2)
         ctk.CTkRadioButton(self.frame_ai, text="OpenRouter", variable=self.var_ai_provider, value="openrouter", command=self._update_engine_ui).pack(anchor="w", pady=2)
         ctk.CTkLabel(self.frame_ai, text="Режим", anchor="w", font=("Segoe UI", 10, "bold"), text_color=UI.MUTED).pack(fill="x", pady=(7, 2))
         ctk.CTkRadioButton(self.frame_ai, text="Стандартный", variable=self.var_ai_mode, value="safe").pack(anchor="w", pady=2)
@@ -424,6 +427,30 @@ class TranslatorApp(ctk.CTk):
                 if not model:
                     return False, "Не выбрана модель OpenRouter"
                 return True, f"OpenRouter · {model}"
+            if self.var_ai_provider.get() == "lmstudio":
+                base_url = settings.get("LMSTUDIO", "base_url").strip()
+                model = settings.get("LMSTUDIO", "model").strip()
+                if not base_url:
+                    return False, "Не указан адрес LM Studio"
+                if not model:
+                    return False, "Не выбрана модель LM Studio"
+                return True, f"LM Studio · {model}"
+            if self.var_ai_provider.get() == "ollama":
+                base_url = settings.get("OLLAMA", "base_url").strip()
+                model = settings.get("OLLAMA", "model").strip()
+                if not base_url:
+                    return False, "Не указан адрес Ollama"
+                if not model:
+                    return False, "Не выбрана модель Ollama"
+                return True, f"Ollama · {model}"
+            if self.var_ai_provider.get() == "llama":
+                base_url = settings.get("LLAMA", "base_url").strip()
+                model = settings.get("LLAMA", "model").strip()
+                if not base_url:
+                    return False, "Не указан адрес Llama"
+                if not model:
+                    return False, "Не выбрана модель Llama"
+                return True, f"Llama · {model}"
             model_path = settings.get("AI", "model_path").strip()
             if not model_path:
                 return False, "Не выбрана локальная GGUF-модель"

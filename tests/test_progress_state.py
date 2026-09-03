@@ -1,4 +1,6 @@
-import unittest
+﻿import unittest
+
+from unittest import mock
 
 from mineai.runtime.state import JobSnapshot, JobState
 
@@ -122,6 +124,39 @@ class JobStateProgressTests(unittest.TestCase):
         )
 
         self.assertEqual(JobState._eta_text(snapshot, now=104.9), "расчёт...")
+
+    def test_pause_time_is_excluded_from_snapshot_elapsed_time(self):
+        with mock.patch(
+            "mineai.runtime.state.time.time",
+            side_effect=[100.0, 110.0, 160.0, 160.0, 160.0],
+        ):
+            state = JobState(is_running=True, total_strings=10)
+            state.begin_progress()
+            state.increment_translated(5)
+            state.pause()
+            paused = state.snapshot()
+            state.resume()
+            resumed = state.snapshot()
+
+        self.assertTrue(paused.is_paused)
+        self.assertAlmostEqual(paused.paused_seconds, 50.0)
+        self.assertAlmostEqual(resumed.paused_seconds, 50.0)
+        self.assertEqual(JobState._eta_text(paused, now=160.0), "10 сек")
+
+    def test_finish_accounts_for_pause_before_freezing_runtime(self):
+        with mock.patch(
+            "mineai.runtime.state.time.time",
+            side_effect=[100.0, 120.0, 145.0],
+        ):
+            state = JobState(is_running=True, total_strings=10, translated_strings=5)
+            state.begin_progress()
+            state.pause()
+            state.finish()
+            snapshot = state.snapshot()
+
+        self.assertFalse(snapshot.is_running)
+        self.assertFalse(snapshot.is_paused)
+        self.assertAlmostEqual(snapshot.paused_seconds, 25.0)
 
 
 if __name__ == "__main__":

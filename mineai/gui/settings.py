@@ -1,4 +1,4 @@
-import ctypes
+﻿import ctypes
 import sys
 
 import customtkinter as ctk
@@ -25,6 +25,9 @@ class SettingsWindow(ctk.CTkToplevel):
         tabs = ctk.CTkTabview(self, fg_color=UI.CARD_BG)
         tabs.pack(fill="both", expand=True, padx=14, pady=(14, 8))
         tab_ai = self._scroll_tab(tabs, "Локальный ИИ")
+        tab_lm = self._scroll_tab(tabs, "LM Studio")
+        tab_ollama = self._scroll_tab(tabs, "Ollama")
+        tab_llama = self._scroll_tab(tabs, "Llama")
         tab_or = self._scroll_tab(tabs, "OpenRouter")
         tab_gen = self._scroll_tab(tabs, "Общие и API")
 
@@ -60,6 +63,27 @@ class SettingsWindow(ctk.CTkToplevel):
         )
         self.slider_gpu.set(gpu_val)
         self.slider_gpu.pack(fill="x", padx=12, pady=(2, 10))
+
+        self._field_label(tab_lm, "Адрес LM Studio")
+        self.ent_lm_url = self._plain_entry(tab_lm, config.get("LMSTUDIO", "base_url"))
+        self._field_label(tab_lm, "API-токен LM Studio (необязательно)")
+        self.ent_lm_key = self._plain_entry(tab_lm, config.get("LMSTUDIO", "api_key"), show="*")
+        self._field_label(tab_lm, "ID модели LM Studio")
+        self.ent_lm_model = self._plain_entry(tab_lm, config.get("LMSTUDIO", "model"))
+
+        self._field_label(tab_ollama, "Адрес Ollama")
+        self.ent_ollama_url = self._plain_entry(tab_ollama, config.get("OLLAMA", "base_url"))
+        self._field_label(tab_ollama, "API-токен Ollama (необязательно)")
+        self.ent_ollama_key = self._plain_entry(tab_ollama, config.get("OLLAMA", "api_key"), show="*")
+        self._field_label(tab_ollama, "Имя модели Ollama")
+        self.ent_ollama_model = self._plain_entry(tab_ollama, config.get("OLLAMA", "model"))
+
+        self._field_label(tab_llama, "Адрес Llama")
+        self.ent_llama_url = self._plain_entry(tab_llama, config.get("LLAMA", "base_url"))
+        self._field_label(tab_llama, "API-токен Llama (необязательно)")
+        self.ent_llama_key = self._plain_entry(tab_llama, config.get("LLAMA", "api_key"), show="*")
+        self._field_label(tab_llama, "ID модели Llama")
+        self.ent_llama_model = self._plain_entry(tab_llama, config.get("LLAMA", "model"))
 
         ctk.CTkLabel(
             tab_or,
@@ -227,6 +251,30 @@ class SettingsWindow(ctk.CTkToplevel):
                 "model": self.ent_or_model.get().strip(),
                 "site_url": self.ent_or_site.get().strip(),
                 "app_name": self.ent_or_app.get().strip(),
+            },
+        )
+        self.config.set_many(
+            "LMSTUDIO",
+            {
+                "base_url": self.ent_lm_url.get().strip(),
+                "api_key": self.ent_lm_key.get().strip(),
+                "model": self.ent_lm_model.get().strip(),
+            },
+        )
+        self.config.set_many(
+            "OLLAMA",
+            {
+                "base_url": self.ent_ollama_url.get().strip(),
+                "api_key": self.ent_ollama_key.get().strip(),
+                "model": self.ent_ollama_model.get().strip(),
+            },
+        )
+        self.config.set_many(
+            "LLAMA",
+            {
+                "base_url": self.ent_llama_url.get().strip(),
+                "api_key": self.ent_llama_key.get().strip(),
+                "model": self.ent_llama_model.get().strip(),
             },
         )
         self.config.set_many(

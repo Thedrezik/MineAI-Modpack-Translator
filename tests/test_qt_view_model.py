@@ -1,4 +1,4 @@
-import tempfile
+﻿import tempfile
 from pathlib import Path
 import unittest
 from pathlib import Path
@@ -41,6 +41,19 @@ class DashboardStatsTests(unittest.TestCase):
         self.assertEqual(stats.percent, 100.0)
         self.assertAlmostEqual(stats.lines_per_minute, 100.0)
         self.assertEqual(stats.eta_text, "20 сек")
+
+    def test_paused_seconds_are_not_counted_in_dashboard_rate(self):
+        snapshot = SimpleNamespace(
+            total_strings=100,
+            translated_strings=10,
+            ok_strings=10,
+            failed_strings=0,
+            start_time=100.0,
+            paused_seconds=50.0,
+        )
+        stats = stats_from_snapshot(snapshot, now=160.0)
+        self.assertAlmostEqual(stats.elapsed_seconds, 10.0)
+        self.assertAlmostEqual(stats.lines_per_minute, 60.0)
 
     def test_zero_progress_has_no_fake_percentages(self):
         snapshot = SimpleNamespace(

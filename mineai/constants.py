@@ -1,4 +1,4 @@
-SETTINGS_FILE = "settings.ini"
+﻿SETTINGS_FILE = "settings.ini"
 CACHE_FILE_STD = "cache.json"
 CACHE_FILE_AI = "ai_cache.json"
 DICT_FILE = "dictionary.json"
@@ -6,6 +6,9 @@ KOBOLD_API = "http://localhost:5001/v1/chat/completions"
 KOBOLD_MODELS_URL = "http://localhost:5001/v1/models"
 OPENROUTER_API = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_OPENROUTER_MODEL = "google/gemma-2-9b-it:free"
+LMSTUDIO_BASE_URL = "http://localhost:1234/v1"
+OLLAMA_BASE_URL = "http://localhost:11434/api"
+LLAMA_BASE_URL = "http://127.0.0.1:8080/v1"
 
 KEYS_TO_TRANSLATE = frozenset({
     "name", "title", "text", "description", "subtitle", "label", "hover_text", "link_text",
@@ -15,13 +18,34 @@ BOOK_PATH_MARKERS = ("patchouli", "lexicon", "guide")
 MD_PATH_MARKERS = ("/en_us/", "/ae2guide/", "/guide/", "/manual/", "/lexicon/")
 RESEARCH_PATH_MARKERS = ("/research/", "/researches/", "/quests/")
 
-LOOSE_JSON_SEARCH_DIRS = ("kubejs/assets", "defaultconfigs", "config/ftbquests/lang")
+LOOSE_JSON_SEARCH_DIRS = (
+    "kubejs",
+    "defaultconfigs",
+    "config",
+    "resourcepacks",
+    "packmenu",
+    "patchouli_books",
+)
 
 IGNORE_TERMS = [
     "RF", "FE", "EU", "J", "mB", "mB/t", "RF/t", "FE/t", "AE", "kW", "kRF", "mB/tick",
     "ticks", "GUI", "UI", "HUD", "JEI", "REI", "EMI", "API", "JSON", "NBT", "FPS", "TPS",
     "HP", "XP", "MP", "XP/t", "XYZ", "RGB", "ID", "II", "III", "IV", "VI", "VII", "VIII",
     "IX", "XI", "XII",
+    # --- H2: Mod names that must not be translated ---
+    # Multi-word mod names (checked first due to sort-by-len)
+    "Applied Energistics", "Industrial Foregoing", "Silent Gear", "Twilight Forest",
+    "Refined Storage", "Blood Magic", "Thermal Expansion", "Thermal Foundation",
+    "Thermal Dynamics", "Tinkers Construct", "Natura Mystica", "Deep Dark Regalia",
+    "Mekanism Generators", "Mekanism Tools",
+    # Single-word mod names
+    "Apotheosis", "Allthemodium", "Botania", "Mekanism", "Powah", "Create",
+    "Mystical", "Hexerei", "Malum", "Occultism", "Pneumaticraft", "Paxel",
+    "Warden", "Allay", "Sniffer",
+    # Add-on/mod names and UI labels that are proper names, not prose.
+    "Farmer's Delight", "Farmer’s Delight", "Aquatic Ambitions", "Deep Dark",
+    "Kruidnoten", "FTB Teams", "Quest Book", "Discord",
+    "ME Advanced Pattern Provider", "RPM", "SU", "HW", "WW1", "Shift",
 ]
 IGNORE_TERMS.sort(key=len, reverse=True)
 

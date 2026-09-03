@@ -1,13 +1,52 @@
+﻿import hashlib
+import inspect
 import json
 import os
 import shutil
 import threading
 import unicodedata
-from mineai.constants import CACHE_FILE_AI, CACHE_FILE_STD
+from mineai import __version__
+from mineai.constants import CACHE_FILE_AI, CACHE_FILE_STD, LANGUAGES
 from mineai.io_utils import atomic_write_text
-from mineai.text_processing import polish_translation
+from mineai.language_validation import (
+    has_long_untranslated_english_fragment,
+    translation_needs_repair,
+)
+from mineai.text_processing import (
+    is_technical_term,
+    is_translation_key,
+    polish_translation,
+    translation_length_issue,
+)
 
 _IDENTITY_PREFIX = "__mineai_identity__:"
+_CACHE_VERSION_KEY = "__mineai_ai_cache_validation_version__"
+_LANGUAGE_BY_API = {item["api"]: item for item in LANGUAGES.values()}
+
+
+def _cache_validation_version() -> str:
+    """Derive the cache marker from this release and the validator source."""
+    try:
+        validator_source = inspect.getsource(polish_translation)
+        validator_signature = str(inspect.signature(polish_translation))
+    except (OSError, TypeError):
+        code = getattr(polish_translation, "__code__", None)
+        if code is not None:
+            validator_source = repr(
+                (code.co_code.hex(), code.co_consts, code.co_names)
+            )
+        else:
+            validator_source = (
+                f"{polish_translation.__module__}."
+                f"{polish_translation.__qualname__}"
+            )
+        validator_signature = str(inspect.signature(polish_translation))
+    payload = f"{__version__}\n{validator_signature}\n{validator_source}"
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
+    return f"{__version__}|{digest}"
+
+
+_CACHE_VALIDATION_VERSION = _cache_validation_version()
 
 
 def _normalize_cache_source(text: str) -> str:
@@ -29,6 +68,9 @@ class TranslationCache:
         self.load_imported_caches()
         self.polish_changes = self.load_and_polish()
 
+    def _is_ai_cache(self) -> bool:
+        return os.path.basename(self.filepath).casefold() == "ai_cache.json"
+
     # ------------------------------------------------------------------
     def load_imported_caches(self) -> None:
         with self._lock:
@@ -42,9 +84,10 @@ class TranslationCache:
                 if filename.endswith(".json"):
                     path = os.path.join(import_dir, filename)
                     try:
-                        with open(path, "r", encoding="utf-8") as f:
-                            loaded = json.load(f)
-                        if self._is_valid_payload(loaded):
+                        with open(path, "r", encoding="utf-8-sig") as f:
+                            loaded = self._coerce_payload(json.load(f))
+                        if loaded is not None:
+                            loaded.pop(_CACHE_VERSION_KEY, None)
                             self._imported_data.update(loaded)
                     except (json.JSONDecodeError, OSError):
                         pass
@@ -54,45 +97,128 @@ class TranslationCache:
         changes = 0
         with self._lock:
             if not os.path.exists(self.filepath):
-                self._data = {}
+                self._data = (
+                    {_CACHE_VERSION_KEY: _CACHE_VALIDATION_VERSION}
+                    if self._is_ai_cache()
+                    else {}
+                )
                 return 0
             try:
-                with open(self.filepath, encoding="utf-8") as f:
-                    loaded = json.load(f)
-                if not self._is_valid_payload(loaded):
+                with open(self.filepath, encoding="utf-8-sig") as f:
+                    loaded = self._coerce_payload(json.load(f))
+                if loaded is None:
                     self._backup_corrupt_file()
-                    self._data = {}
+                    self._reset_corrupt_ai_cache_unlocked()
                     return 0
                 self._data = loaded
                 self._last_saved_count = len(self._data)
             except json.JSONDecodeError:
                 self._backup_corrupt_file()
-                self._data = {}
+                self._reset_corrupt_ai_cache_unlocked()
                 return 0
             except OSError:
                 self._data = {}
                 return 0
 
+
+            if (
+                self._is_ai_cache()
+                and self._data.get(_CACHE_VERSION_KEY) != _CACHE_VALIDATION_VERSION
+            ):
+                self._backup_before_auto_repair()
+                self._data[_CACHE_VERSION_KEY] = _CACHE_VALIDATION_VERSION
+                changes += 1
+                self._dirty = True
+
             for key, value in list(self._data.items()):
+                if key == _CACHE_VERSION_KEY:
+                    continue
                 if key.startswith(_IDENTITY_PREFIX):
+                    identity_payload = key[len(_IDENTITY_PREFIX):]
+                    _api_code, separator, source = identity_payload.partition("_")
+                    source_payload = source.rsplit("␟", 1)[-1]
+                    if separator and is_translation_key(source_payload):
+                        self._backup_before_auto_repair()
+                        del self._data[key]
+                        changes += 1
                     continue
                 api_code, sep, source = key.partition("_")
                 if not sep:
+                    self._backup_before_auto_repair()
                     del self._data[key]
                     changes += 1
                     continue
-                if api_code != "en" and value == source:
+                source_payload = source.rsplit("␟", 1)[-1]
+                language = _LANGUAGE_BY_API.get(api_code)
+                if not value.strip():
+                    self._backup_before_auto_repair()
                     del self._data[key]
                     changes += 1
                     continue
-                polished = polish_translation(value)
+                if api_code != "en" and value.strip() == source_payload.strip():
+                    self._backup_before_auto_repair()
+                    del self._data[key]
+                    if is_technical_term(source_payload):
+                        self._data[self.make_identity_key(api_code, source)] = "1"
+                    changes += 1
+                    continue
+                if (
+                    language is not None
+                    and has_long_untranslated_english_fragment(value, language)
+                ):
+                    self._backup_before_auto_repair()
+                    del self._data[key]
+                    changes += 1
+                    continue
+                if (
+                    language is not None
+                    and api_code != "en"
+                    and translation_needs_repair(
+                        source_payload,
+                        value,
+                        language,
+                    )
+                ):
+                    self._backup_before_auto_repair()
+                    del self._data[key]
+                    changes += 1
+                    continue
+                if translation_length_issue(source_payload, value):
+                    self._backup_before_auto_repair()
+                    del self._data[key]
+                    changes += 1
+                    continue
+                polished = polish_translation(
+                    value,
+                    boundary_source=source_payload,
+                )
                 if polished != value:
+                    self._backup_before_auto_repair()
                     self._data[key] = polished
                     changes += 1
             if changes:
                 self._dirty = True
                 self._flush_unlocked()
         return changes
+
+    def _reset_corrupt_ai_cache_unlocked(self) -> None:
+        self._data = (
+            {_CACHE_VERSION_KEY: _CACHE_VALIDATION_VERSION}
+            if self._is_ai_cache()
+            else {}
+        )
+        if self._is_ai_cache():
+            self._dirty = True
+            self._flush_unlocked()
+
+    def _backup_before_auto_repair(self) -> None:
+        backup = self.filepath + ".pre-auto-repair"
+        if os.path.exists(backup):
+            return
+        try:
+            shutil.copy2(self.filepath, backup)
+        except OSError:
+            pass
 
     # ------------------------------------------------------------------
     def make_key(self, api_code: str, source_text: str) -> str:
@@ -112,7 +238,7 @@ class TranslationCache:
                 if key in self._imported_data:
                     return self._imported_data[key], True
             if identity in self._data:
-                return source_text, False
+                return source_text.rsplit("␟", 1)[-1], False
             return None, False
 
     def set(self, api_code: str, source_text: str, translated: str) -> None:
@@ -181,11 +307,23 @@ class TranslationCache:
         self._last_saved_count = len(self._data)
 
     @staticmethod
-    def _is_valid_payload(payload: object) -> bool:
-        return isinstance(payload, dict) and all(
-            isinstance(k, str) and isinstance(v, str)
-            for k, v in payload.items()
-        )
+    def _coerce_payload(payload: object) -> dict[str, str] | None:
+        if not isinstance(payload, dict):
+            return None
+        result: dict[str, str] = {}
+        for key, value in payload.items():
+            if not isinstance(key, str):
+                return None
+            if key == _CACHE_VERSION_KEY and isinstance(value, (int, float)):
+                value = str(value)
+            if not isinstance(value, str):
+                return None
+            result[key] = value
+        return result
+
+    @classmethod
+    def _is_valid_payload(cls, payload: object) -> bool:
+        return cls._coerce_payload(payload) is not None
 
     def _backup_corrupt_file(self) -> None:
         backup = self.filepath + ".corrupt"

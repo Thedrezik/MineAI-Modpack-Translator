@@ -1,4 +1,4 @@
-import threading
+﻿import threading
 import time
 from dataclasses import dataclass, field
 
@@ -18,6 +18,7 @@ class JobSnapshot:
     cached_strings: int = 0
     fallback_strings: int = 0
     protected_strings: int = 0
+    paused_seconds: float = 0.0
 
 
 @dataclass
@@ -35,9 +36,11 @@ class JobState:
     cached_strings: int = 0
     fallback_strings: int = 0
     protected_strings: int = 0
+    paused_seconds: float = 0.0
 
     _lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
     _condition: threading.Condition = field(init=False, repr=False)
+    _pause_started_at: float | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self._condition = threading.Condition(self._lock)
@@ -55,6 +58,8 @@ class JobState:
         self.cached_strings = 0
         self.fallback_strings = 0
         self.protected_strings = 0
+        self.paused_seconds = 0.0
+        self._pause_started_at = None
 
     def reset_progress(self) -> None:
         with self._lock:
@@ -71,6 +76,7 @@ class JobState:
     def finish(self) -> None:
         with self._condition:
             self.is_running = False
+            self._accumulate_pause_unlocked()
             self.is_paused = False
             self._condition.notify_all()
 
@@ -78,13 +84,17 @@ class JobState:
         with self._condition:
             if not self.is_running:
                 return False
+            if self.is_paused:
+                return True
             self.is_paused = True
+            self._pause_started_at = time.time()
             return True
 
     def resume(self) -> bool:
         with self._condition:
             if not self.is_paused:
                 return False
+            self._accumulate_pause_unlocked()
             self.is_paused = False
             self._condition.notify_all()
             return True
@@ -94,9 +104,19 @@ class JobState:
             if not self.is_running:
                 return False
             self.is_paused = not self.is_paused
-            if not self.is_paused:
+            if self.is_paused:
+                self._pause_started_at = time.time()
+            else:
+                self._accumulate_pause_unlocked()
                 self._condition.notify_all()
             return self.is_paused
+
+    def _accumulate_pause_unlocked(self, now: float | None = None) -> None:
+        if self._pause_started_at is None:
+            return
+        current = time.time() if now is None else now
+        self.paused_seconds += max(0.0, current - self._pause_started_at)
+        self._pause_started_at = None
 
     def wait_if_paused(self) -> None:
         with self._condition:
@@ -127,6 +147,8 @@ class JobState:
             self.cached_strings = 0
             self.fallback_strings = 0
             self.protected_strings = 0
+            self.paused_seconds = 0.0
+            self._pause_started_at = None
 
     def increment_translated(self, count: int = 1) -> None:
         with self._lock:
@@ -181,6 +203,14 @@ class JobState:
                 cached_strings=self.cached_strings,
                 fallback_strings=self.fallback_strings,
                 protected_strings=self.protected_strings,
+                paused_seconds=(
+                    self.paused_seconds
+                    + (
+                        max(0.0, time.time() - self._pause_started_at)
+                        if self._pause_started_at is not None
+                        else 0.0
+                    )
+                ),
             )
 
     # ------------------------------------------------------------------
@@ -189,6 +219,8 @@ class JobState:
         if snapshot.translated_strings <= 0 or not snapshot.start_time:
             return "расчёт..."
         elapsed = (time.time() if now is None else now) - snapshot.start_time
+        elapsed -= max(0.0, float(getattr(snapshot, "paused_seconds", 0.0)))
+        elapsed = max(0.0, elapsed)
         if elapsed < 5:
             return "расчёт..."
         remaining = snapshot.total_strings - snapshot.translated_strings

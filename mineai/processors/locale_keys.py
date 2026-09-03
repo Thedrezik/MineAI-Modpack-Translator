@@ -1,4 +1,4 @@
-from mineai.text_processing import is_technical_term, looks_like_source_language
+﻿from mineai.text_processing import is_technical_term, looks_like_source_language
 
 
 def collect_lang_keys_to_translate(

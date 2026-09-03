@@ -1,10 +1,11 @@
-name: Tests
+﻿name: Tests
 
 on:
   push:
-    branches: [beta]
+    branches: [main, beta, beta41, beta42, beta43, beta44, beta45]
   pull_request:
-    branches: [beta]
+    branches: [main, beta, beta41, beta42, beta43, beta44, beta45]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -29,7 +30,7 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libegl1 libgl1
       - name: Compile sources
-        run: python -m compileall -q mineai tests translator.py
+        run: python -m compileall -q formatkit mineai tests tools translator.py
       - name: Run unit tests
         run: python -m unittest discover -s tests -v
       - name: Qt production smoke
@@ -54,11 +55,37 @@ jobs:
       - name: Verify packaged EXE
         shell: pwsh
         run: |
-          if (-not (Test-Path "dist\MineAI_Translator.exe")) {
-            throw "dist\MineAI_Translator.exe was not created"
+          if (-not (Test-Path "dist\MineAI_Translator_Beta45.exe")) {
+            throw "dist\MineAI_Translator_Beta45.exe was not created"
           }
-          $size = (Get-Item "dist\MineAI_Translator.exe").Length
-          if ($size -lt 1000000) {
+          $size = (Get-Item "dist\MineAI_Translator_Beta45.exe").Length
+          if ($size -lt 30000000) {
             throw "Packaged EXE is unexpectedly small: $size bytes"
           }
           Write-Host "Packaged EXE size $size bytes"
+          $psi = [System.Diagnostics.ProcessStartInfo]::new()
+          $psi.FileName = (Resolve-Path "dist\MineAI_Translator_Beta45.exe").Path
+          $psi.WorkingDirectory = $env:RUNNER_TEMP
+          $psi.UseShellExecute = $false
+          $psi.CreateNoWindow = $true
+          $psi.EnvironmentVariables["QT_QPA_PLATFORM"] = "offscreen"
+          $process = [System.Diagnostics.Process]::Start($psi)
+          if ($null -eq $process) {
+            throw "Packaged EXE could not be started"
+          }
+          try {
+            Start-Sleep -Seconds 8
+            if ($process.HasExited) {
+              throw "Packaged EXE exited during Qt smoke test with code $($process.ExitCode)"
+            }
+            Write-Host "Packaged Qt EXE smoke PASS"
+          }
+          finally {
+            taskkill /PID $process.Id /T /F 2>$null | Out-Null
+          }
+      - name: Upload Windows build
+        uses: actions/upload-artifact@v4
+        with:
+          name: MineAI-Translator-Windows
+          path: dist/MineAI_Translator_Beta45.exe
+          if-no-files-found: error

@@ -1,8 +1,9 @@
-"""Pure semantic model for the high-volume Qt journal."""
+﻿"""Pure semantic model for the high-volume Qt journal."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 import re
 
 
@@ -109,6 +110,21 @@ def entry_from_message(tag: str, message: str, color: str) -> LogEntry:
         category=classify_message(level, message),
         segments=(LogSegment(message, color),),
     )
+
+
+def format_persisted_log_line(entry: LogEntry, timestamp: datetime) -> str:
+    """Serialize one complete entry without modifying its diagnostic payload."""
+    prefix = timestamp.strftime("[%Y-%m-%d %H:%M:%S]")
+    return (
+        f"{prefix} [{entry.level.upper()}] [{entry.category.upper()}] "
+        f"{entry.plain_text}"
+    )
+
+
+def format_session_header(version: str, started_at: datetime) -> str:
+    """Return a searchable boundary between application sessions."""
+    timestamp = started_at.strftime("%Y-%m-%d %H:%M:%S")
+    return f"\n{'=' * 24} NEW SESSION · {version} · {timestamp} {'=' * 24}\n"
 
 
 def matches_entry(entry: LogEntry, filter_key: str, query: str = "") -> bool:

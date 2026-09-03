@@ -1,4 +1,4 @@
-import json
+﻿import json
 import os
 import tempfile
 import unittest
@@ -89,6 +89,21 @@ class RetryCancellationTests(unittest.TestCase):
 
         request.assert_called_once_with()
 
+    def test_rate_limit_retry_can_be_disabled_for_endpoint_failover(self):
+        response = requests.Response()
+        response.status_code = 429
+        response.headers["Retry-After"] = "60"
+        request = mock.Mock(return_value=response)
+
+        with self.assertRaises(requests.HTTPError):
+            request_with_retry(
+                request,
+                operation="test",
+                retry_429=False,
+            )
+
+        request.assert_called_once_with()
+
 
 class EngineCancellationTests(unittest.TestCase):
     @staticmethod
@@ -109,6 +124,63 @@ class EngineCancellationTests(unittest.TestCase):
         ):
             with self.assertRaises(RequestCancelled):
                 engine._request("Hello", "ru")
+
+    def test_google_switches_endpoint_after_a_rate_limited_host(self):
+        engine = GoogleEngine(workers=1)
+        rate_limited = requests.Response()
+        rate_limited.status_code = 429
+        rate_limited.headers["Retry-After"] = "0"
+        rate_limited.url = engine.API_URL
+        translated = requests.Response()
+        translated.status_code = 200
+        translated.url = engine.API_URL
+        translated._content = b'[[["Privet", "Hello", null, null, 1]], null, "en"]'
+        translated.encoding = "utf-8"
+
+        with mock.patch(
+            "mineai.engines.google.requests.get",
+            side_effect=(rate_limited, translated),
+        ) as request:
+            result = engine._request("Hello", "ru")
+
+        self.assertEqual(result, "Privet")
+        self.assertEqual(request.call_count, 2)
+        self.assertEqual(request.call_args_list[0].args[0], engine.API_URL)
+        self.assertNotEqual(request.call_args_list[-1].args[0], engine.API_URL)
+
+    def test_google_falls_back_to_mobile_html_after_both_gtx_hosts_are_limited(self):
+        engine = GoogleEngine(workers=1)
+        rate_limited = requests.Response()
+        rate_limited.status_code = 429
+        rate_limited.headers["Retry-After"] = "60"
+        rate_limited.url = engine.API_URL
+        translated = requests.Response()
+        translated.status_code = 200
+        translated.url = engine.MOBILE_API_URL
+        translated._content = (
+            b'<html><div class="result-container">'
+            b'\xd0\x9f\xd1\x80\xd0\xb8\xd0\xb2\xd0\xb5\xd1\x82 '
+            b'[#0#]</div></html>'
+        )
+        translated.encoding = "utf-8"
+
+        with mock.patch(
+            "mineai.engines.google.requests.get",
+            side_effect=(rate_limited, rate_limited, translated),
+        ) as request:
+            result = engine._request("Hello [#0#]", "ru")
+
+        self.assertEqual(result, "Привет [#0#]")
+        self.assertEqual(request.call_count, 3)
+        self.assertEqual(request.call_args_list[-1].args[0], engine.MOBILE_API_URL)
+
+    def test_google_retry_delay_honors_retry_after_header(self):
+        response = requests.Response()
+        response.status_code = 429
+        response.headers["Retry-After"] = "3.5"
+        error = requests.HTTPError(response=response)
+
+        self.assertEqual(GoogleEngine._retry_delay(1, error), 3.5)
 
     def test_google_single_mode_handles_worker_cancellation_cleanly(self):
         engine = GoogleEngine(workers=1, mode="single")
@@ -143,6 +215,92 @@ class EngineCancellationTests(unittest.TestCase):
             )
 
         self.assertEqual(result, {})
+
+    def test_google_single_retries_reordered_placeholders(self):
+        engine = GoogleEngine(workers=1, mode="single")
+        item = EngineItem(
+            key="k",
+            original="Read [Guide](guide.md).",
+            masked="Read [#0#]Guide[#1#].",
+            mapping={"[#0#]": "[", "[#1#]": "](guide.md)"},
+        )
+
+        with mock.patch.object(
+            engine,
+            "_request",
+            side_effect=(
+                "Читайте [#1#]руководство[#0#].",
+                "Читайте [#0#]руководство[#1#].",
+            ),
+        ) as request:
+            result = engine.translate_batch(
+                {"k": item},
+                {"api": "ru"},
+                self.callbacks(),
+            )
+
+        self.assertEqual(result, {"k": "Читайте [руководство](guide.md)."})
+        self.assertEqual(request.call_count, 2)
+
+    def test_google_sends_only_text_not_structured_unit_id(self):
+        engine = GoogleEngine(workers=1, mode="single")
+        internal_key = "json:/pages/0/title"
+        item = EngineItem(
+            key=internal_key,
+            original="Sliding Doors",
+            masked="Sliding Doors",
+        )
+
+        with mock.patch.object(
+            engine,
+            "_request",
+            return_value="Раздвижные двери",
+        ) as request:
+            result = engine.translate_batch(
+                {internal_key: item},
+                {"api": "ru"},
+                self.callbacks(),
+            )
+
+        self.assertEqual(result, {internal_key: "Раздвижные двери"})
+        self.assertEqual(request.call_args.args[0], "Sliding Doors")
+        self.assertNotIn(internal_key, request.call_args.args[0])
+
+    def test_google_batch_retries_smeared_duplicate_rows_separately(self):
+        engine = GoogleEngine(workers=1, mode="batch")
+        items = {
+            "first": EngineItem(
+                "first",
+                "The first independent sentence describes a crafting machine.",
+                "The first independent sentence describes a crafting machine.",
+            ),
+            "second": EngineItem(
+                "second",
+                "The second independent sentence explains a wireless terminal.",
+                "The second independent sentence explains a wireless terminal.",
+            ),
+        }
+        duplicate = "Это ошибочно объединённый перевод двух разных длинных строк."
+
+        with mock.patch.object(
+            engine,
+            "_request",
+            side_effect=(
+                duplicate + GoogleEngine.BATCH_SEP + duplicate,
+                "Первая строка описывает машину для крафта.",
+                "Вторая строка объясняет беспроводной терминал.",
+            ),
+        ) as request, mock.patch(
+            "mineai.engines.google.time.sleep", return_value=None
+        ):
+            result = engine.translate_batch(
+                items,
+                {"api": "ru"},
+                self.callbacks(),
+            )
+
+        self.assertNotEqual(result["first"], result["second"])
+        self.assertEqual(request.call_count, 3)
 
     def test_openrouter_cancellation_bubbles_to_engine_boundary_without_error_log(self):
         engine = OpenRouterEngine("key", "model")

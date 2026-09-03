@@ -1,4 +1,4 @@
-import json
+﻿import json
 import os
 import tempfile
 import unittest
@@ -237,16 +237,178 @@ class BookParityTests(unittest.TestCase):
             for internal, content in files.items():
                 archive.writestr(internal, content.encode("utf-8"))
 
+    def _assert_root_markdown_book_path(
+        self,
+        source_path: str,
+        target_path: str,
+        extra_files: dict[str, str] | None = None,
+        source_content: str = "Root guide page",
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            jar_path = Path(temp_dir) / "root-book.jar"
+            files = {source_path: source_content}
+            files.update(extra_files or {})
+            self._write_jar(jar_path, files)
+
+            state = _state()
+            estimated = StringEstimator(state).estimate(
+                [str(jar_path)],
+                [],
+                [],
+                [],
+                target_lang=TARGET_LANG,
+                mode="append",
+                translate_mods=False,
+                translate_books=True,
+                translate_quests=False,
+                smart_glue=False,
+            )
+
+            service = _Service()
+            writer = _Writer()
+            JarProcessor(service, state, _callbacks()).process(
+                str(jar_path),
+                target_lang=TARGET_LANG,
+                mode="append",
+                output_mode="resourcepack",
+                translate_mods=False,
+                translate_books=True,
+                pack_writer=writer,
+            )
+
+            self.assertEqual(estimated, 1)
+            self.assertEqual(
+                [value for call in service.calls for value in call.values()],
+                ["Root guide page"],
+            )
+            self.assertIn(target_path, writer.files)
+            self.assertNotIn(source_path, writer.files)
+
+    def test_ae2_root_guide_uses_guideme_underscored_locale_directory(self) -> None:
+        self._assert_root_markdown_book_path(
+            "assets/ae2/ae2guide/index.md",
+            "assets/ae2/ae2guide/_ru_ru/index.md",
+        )
+
+    def test_mi_root_guide_preserves_underscored_locale_convention(self) -> None:
+        self._assert_root_markdown_book_path(
+            "assets/modern_industrialization/mi_guidebook/index.md",
+            "assets/modern_industrialization/mi_guidebook/_ru_ru/index.md",
+            {
+                "assets/modern_industrialization/mi_guidebook/_ja_jp/index.md":
+                    "日本語ページ",
+            },
+        )
+
+    def test_oracle_index_estimator_matches_sdk_processor(self) -> None:
+        source_path = "assets/demo/oracle_index/books/guide/index.mdx"
+        target_path = (
+            "assets/demo/oracle_index/books/guide/"
+            ".translated/ru_ru/index.mdx"
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            jar_path = Path(temp_dir) / "oracle.jar"
+            self._write_jar(
+                jar_path,
+                {source_path: "# Getting Started\n\nNew paragraph.\n"},
+            )
+            state = _state()
+            estimated = StringEstimator(state).estimate(
+                [str(jar_path)],
+                [],
+                [],
+                [],
+                target_lang=TARGET_LANG,
+                mode="force",
+                translate_mods=False,
+                translate_books=True,
+                translate_quests=False,
+                smart_glue=False,
+            )
+            service = _Service()
+            writer = _Writer()
+            JarProcessor(service, state, _callbacks()).process(
+                str(jar_path),
+                target_lang=TARGET_LANG,
+                mode="force",
+                output_mode="resourcepack",
+                translate_mods=False,
+                translate_books=True,
+                pack_writer=writer,
+            )
+
+            processed = sum(len(call) for call in service.calls)
+            self.assertEqual(estimated, processed)
+            self.assertEqual(estimated, 2)
+            self.assertIn(target_path, writer.files)
+
+    def test_locale_json_book_does_not_require_framework_name_in_path(self) -> None:
+        source_path = (
+            "assets/tconstruct/book/puny_smelting/en_us/casting/intro.json"
+        )
+        target_path = (
+            "assets/tconstruct/book/puny_smelting/ru_ru/casting/intro.json"
+        )
+        source = {"title": "Casting", "text": "Cast molten materials."}
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            jar_path = Path(temp_dir) / "book.jar"
+            self._write_jar(jar_path, {source_path: json.dumps(source)})
+            state = _state()
+            estimated = StringEstimator(state).estimate(
+                [str(jar_path)],
+                [],
+                [],
+                [],
+                target_lang=TARGET_LANG,
+                mode="force",
+                translate_mods=False,
+                translate_books=True,
+                translate_quests=False,
+                smart_glue=False,
+            )
+            service = _Service()
+            writer = _Writer()
+            JarProcessor(service, state, _callbacks()).process(
+                str(jar_path),
+                target_lang=TARGET_LANG,
+                mode="force",
+                output_mode="resourcepack",
+                translate_mods=False,
+                translate_books=True,
+                pack_writer=writer,
+            )
+
+        self.assertEqual(estimated, 2)
+        self.assertIn(target_path, writer.files)
+
+    def test_explicit_locale_lang_book_is_processed_without_mod_rule(self) -> None:
+        self._assert_root_markdown_book_path(
+            "assets/tconstruct/book/puny_smelting/en_us/language.lang",
+            "assets/tconstruct/book/puny_smelting/ru_ru/language.lang",
+            source_content="intro=Root guide page",
+        )
+
+    def test_markdown_long_extension_uses_same_book_pipeline(self) -> None:
+        self._assert_root_markdown_book_path(
+            "assets/example/guide/en_us/start.markdown",
+            "assets/example/guide/ru_ru/start.markdown",
+        )
+
     def test_book_json_append_preserves_existing_and_counts_new(self) -> None:
         source_path = "assets/demo/patchouli_books/guide/en_us/entries/a.json"
         target_path = "assets/demo/patchouli_books/guide/ru_ru/entries/a.json"
         source = {
             "name": "Original title",
-            "text": "New paragraph",
+            "pages": [
+                {"type": "patchouli:text", "text": "New paragraph"},
+            ],
         }
         target = {
             "name": "Сохранённый заголовок",
-            "text": "New paragraph",
+            "pages": [
+                {"type": "patchouli:text", "text": "New paragraph"},
+            ],
         }
 
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -288,10 +450,39 @@ class BookParityTests(unittest.TestCase):
 
             self.assertEqual(estimated, 1)
             self.assertEqual(len(service.calls), 1)
-            self.assertEqual(set(service.calls[0]), {"text"})
+            self.assertEqual(set(service.calls[0]), {"json:/pages/0/text"})
             output = json.loads(writer.files[target_path])
             self.assertEqual(output["name"], "Сохранённый заголовок")
-            self.assertEqual(output["text"], "Перевод: New paragraph")
+            self.assertEqual(
+                output["pages"][0]["text"],
+                "Перевод: New paragraph",
+            )
+
+    def test_datapack_patchouli_json_is_written_to_target_locale_path(self) -> None:
+        source_path = "data/demo/patchouli_books/guide/en_us/entries/a.json"
+        target_path = "data/demo/patchouli_books/guide/ru_ru/entries/a.json"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            jar_path = Path(temp_dir) / "legacy_patchouli.jar"
+            self._write_jar(
+                jar_path,
+                {source_path: json.dumps({"name": "Getting Started"})},
+            )
+            state = _state()
+            writer = _Writer()
+
+            JarProcessor(_Service(), state, _callbacks()).process(
+                str(jar_path),
+                target_lang=TARGET_LANG,
+                mode="force",
+                output_mode="resourcepack",
+                translate_mods=False,
+                translate_books=True,
+                pack_writer=writer,
+            )
+
+            self.assertIn(target_path, writer.files)
+            output = json.loads(writer.files[target_path])
+            self.assertEqual(output["name"], "Перевод: Getting Started")
 
     def test_book_markdown_append_uses_same_yaml_and_line_rules(self) -> None:
         source_path = "assets/demo/guide/en_us/page.md"
@@ -357,11 +548,15 @@ class BookParityTests(unittest.TestCase):
             )
 
             self.assertEqual(estimated, 1)
-            self.assertEqual(service.calls, [{"6": "New paragraph"}])
+            self.assertEqual(len(service.calls), 1)
+            pending_payload = next(iter(service.calls[0].values()))
+            self.assertIn("New paragraph", pending_payload)
+            self.assertNotIn("Сохранённый абзац", pending_payload)
             output = writer.files[target_path].decode("utf-8")
             self.assertIn("title: Сохранённый заголовок", output)
             self.assertIn("Сохранённый абзац", output)
-            self.assertIn("Перевод: New paragraph", output)
+            self.assertIn("Перевод:", output)
+            self.assertIn("New paragraph", output)
             self.assertIn("![image](image.png)", output)
 
 

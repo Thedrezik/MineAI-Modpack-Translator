@@ -1,25 +1,78 @@
-# Сборка через PyInstaller
-build/
-dist/
+﻿# Сборка через PyInstaller и локальные результаты сборки
+/build/
+/dist/
 *.spec
+!MineAI_Translator_Beta36.spec
+!MineAI_Translator_Beta39.spec
+!MineAI_Translator_Beta41.spec
+!MineAI_Translator_Beta42.spec
+!MineAI_Translator_Beta43.spec
+!MineAI_Translator_Beta44.spec
+!MineAI_Translator_Beta45.spec
 
-# Кэш Python
+# Временные каталоги и результаты инструментов
+/log_test/
+/graphify-out/
+
+# Логи, отчёты и архивы локальных запусков
+*.log
+*.log.*
+*_log.txt
+*_log_export.txt
+*_preview.txt
+*_report.txt
+*.zip
+*.7z
+*.rar
+*.tar
+*.tar.gz
+*.tgz
+*.exe
+*.msi
+
+# Локальные настройки, словари и кэши (glossary.json намеренно не скрывается:
+# это поставляемый файл-шаблон)
+settings*.ini
+dictionary*.json
+prompts*.json
+ai_cache*.json
+cache*.json
+*.json.pre-auto-repair
+*.json.pre-*
+*.bak
+*.orig
+
+# Кэш Python и результаты тестов
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.coverage
+coverage.xml
+htmlcov/
 
-# Локальные настройки и кэши приложения
-settings.ini
-dictionary.json
-ai_error_log.txt
-mineai_log.txt
-prompts.json
-mineai/__pycache__/__init__.cpython-312.pyc
-mineai/__pycache__/__init__.cpython-312.pyc
-/mineai/__pycache__
-/mineai/__pycache__
-/mineai/engines/__pycache__
+# Виртуальные окружения и пакеты разработки
+.venv/
+venv/
+env/
+*.egg-info/
+
+# Локальные файлы IDE и ОС
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+
+# Вспомогательные файлы, не относящиеся к исходному проекту
+Claude_Free.bat
 digest.txt
 fixcodeaigemini.py
 buildadmin.bat

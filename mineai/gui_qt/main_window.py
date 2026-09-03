@@ -1,4 +1,4 @@
-"""Premium PyQt6 dashboard for MineAI Translator.
+﻿"""Premium PyQt6 dashboard for MineAI Translator.
 
 This module is an alternate presentation layer for the existing beta runtime.
 TranslationJob, JobState, engines, processors, caches and PackWriter remain the
@@ -7,6 +7,8 @@ single source of truth for translation behavior.
 
 from __future__ import annotations
 
+from datetime import datetime
+from dataclasses import replace
 from pathlib import Path
 import sys
 import threading
@@ -46,10 +48,25 @@ from mineai.constants import LANGUAGES, MC_VERSIONS
 from mineai.runtime.job import TranslationJob, TranslationOptions
 from mineai.runtime.state import JobState
 from mineai.gui_qt.bridge import RuntimeSignals
-from mineai.gui_qt.dialogs import MigrationDialog, PromptEditorDialog, SettingsDialog
+from mineai.gui_qt.dialogs import (
+    AnalysisSelectionDialog,
+    MigrationDialog,
+    PreviewDialog,
+    PromptEditorDialog,
+    SettingsDialog,
+)
 from mineai.gui_qt.i18n import t, translator
 from mineai.gui_qt.i18n_runtime import tr as rt
-from mineai.gui_qt.log_model import LogEntry, LogSegment, entry_from_message, matches_entry, split_translation_message
+from mineai.gui_qt.log_model import (
+    LogEntry,
+    LogSegment,
+    entry_from_message,
+    format_persisted_log_line,
+    format_session_header,
+    matches_entry,
+    split_translation_message,
+)
+from mineai.preview import build_preview_from_directory
 from mineai.gui_qt.theme import theme_qss
 from mineai.gui_qt.view_model import ENGINE_OPTIONS, compact_runtime_status, dashboard_columns, detected_source_roots, engine_readiness, format_duration, stats_from_snapshot
 from mineai.gui_qt.widgets import Card, ElidedLabel, HelpMarker, LabeledValue, ScrollSafeComboBox, ScrollSafeSpinBox, SegmentedProgressBar, StatCard, StatusPill
@@ -107,14 +124,20 @@ class TranslatorQtWindow(QMainWindow):
         self.cache_std, self.cache_ai, polish_total = load_both_caches()
         self._job: TranslationJob | None = None
         self._worker: threading.Thread | None = None
+        self._ui_locked = False
+        self._fallback_before_cache_recovery: bool | None = None
         self._closing = False
         self._allow_close = False
         self._runtime_ended_at: float | None = None
         self._task_detail = ""
         self._log_entries: list[LogEntry] = []
+        self._analysis_items: dict[str, object] = {}
+        self._analysis_selected: set[str] = set()
+        self._analysis_ready = False
         self._log_file = None
         try:
             self._log_file = LOG_PATH.open("a", encoding="utf-8", buffering=1)
+            self._log_file.write(format_session_header(__version__, datetime.now()))
         except OSError:
             self._log_file = None
 
@@ -122,6 +145,7 @@ class TranslatorQtWindow(QMainWindow):
         self.signals.log.connect(self._append_log)
         self.signals.status.connect(self._set_status)
         self.signals.row.connect(self._append_analysis_row)
+        self.signals.analysis_item.connect(self._append_analysis_item)
         self.signals.worker_finished.connect(self._worker_finished)
         self.signals.worker_failed.connect(self._worker_failed)
 
@@ -207,6 +231,12 @@ class TranslatorQtWindow(QMainWindow):
         self.system_pill = StatusPill()
         layout.addWidget(self.system_pill)
         layout.addSpacing(14)
+
+        self.preview_header_button = QPushButton(t("button.preview"))
+        self.preview_header_button.setObjectName("HeaderButton")
+        self.preview_header_button.setToolTip(t("tooltip.preview"))
+        self.preview_header_button.clicked.connect(self._open_preview)
+        layout.addWidget(self.preview_header_button)
 
         self.settings_button = QPushButton(t("header.settings"))
         self.settings_button.setObjectName("HeaderButton")
@@ -306,8 +336,14 @@ class TranslatorQtWindow(QMainWindow):
         language_label.setObjectName("FieldLabel")
         self.version_combo = ScrollSafeComboBox()
         self.version_combo.addItems(MC_VERSIONS)
+        self.version_combo.currentTextChanged.connect(
+            lambda value: settings.set("GENERAL", "minecraft_version", value)
+        )
         self.language_combo = ScrollSafeComboBox()
         self.language_combo.addItems(list(LANGUAGES.keys()))
+        self.language_combo.currentTextChanged.connect(
+            lambda value: settings.set("GENERAL", "target_language", value)
+        )
         self.language_combo.currentTextChanged.connect(self._refresh_system_readiness)
         selectors.addWidget(version_label, 0, 0)
         selectors.addWidget(self.version_combo, 1, 0)
@@ -324,7 +360,17 @@ class TranslatorQtWindow(QMainWindow):
         label.setObjectName("FieldLabel")
         label.setFixedWidth(92)
         self.engine_combo = ScrollSafeComboBox()
-        self.engine_combo.addItems(["Google", "DeepL", rt("engine.local"), "OpenRouter"])
+        self.engine_combo.addItems(
+            [
+                "Google",
+                "DeepL",
+                rt("engine.local"),
+                "LM Studio",
+                "Ollama",
+                "Llama",
+                "OpenRouter",
+            ]
+        )
         self.engine_combo.currentTextChanged.connect(self._engine_changed)
         row.addWidget(label)
         row.addWidget(self.engine_combo, 1)
@@ -371,8 +417,9 @@ class TranslatorQtWindow(QMainWindow):
         ai_grid.addWidget(HelpMarker(t("tooltip.ai_batch")), 1, 1)
         self.ai_batch_spin = ScrollSafeSpinBox()
         self.ai_batch_spin.setRange(1, 40)
-        self.ai_batch_spin.setValue(20)
+        self.ai_batch_spin.setValue(settings.getint("AI", "ai_batch", 20))
         self.ai_batch_spin.valueChanged.connect(self._refresh_footer)
+        self.ai_batch_spin.valueChanged.connect(lambda v: settings.set("AI", "ai_batch", v))
         ai_grid.addWidget(self.ai_batch_spin, 1, 2)
 
         fallback_host = QWidget()
@@ -394,9 +441,14 @@ class TranslatorQtWindow(QMainWindow):
         self.scope_quests = QCheckBox(t("scope.quests"))
         for checkbox in (self.scope_mods, self.scope_books, self.scope_quests):
             checkbox.setChecked(True)
-            checkbox.stateChanged.connect(self._refresh_system_readiness)
+            checkbox.stateChanged.connect(self._scope_changed)
             card.body.addWidget(checkbox)
         return card
+
+    def _scope_changed(self, *_args) -> None:
+        if self._analysis_items:
+            self._clear_analysis_items()
+        self._refresh_system_readiness()
 
     def _build_mode_card(self) -> QWidget:
         card = Card(t("card.mode"))
@@ -420,6 +472,16 @@ class TranslatorQtWindow(QMainWindow):
             self.mode_buttons[value] = button
             mode_row.addWidget(button, 1)
         card.body.addLayout(mode_row)
+
+        self.cache_recovery_checkbox = QCheckBox(t("mode.cache_recovery"))
+        self.cache_recovery_checkbox.setToolTip(t("tooltip.cache_recovery"))
+        self.cache_recovery_checkbox.setChecked(
+            settings.getboolean("GENERAL", "cache_recovery_mode")
+        )
+        self.cache_recovery_checkbox.stateChanged.connect(
+            self._cache_recovery_changed
+        )
+        card.body.addWidget(self.cache_recovery_checkbox)
 
         output_label = QLabel(t("field.output"))
         output_label.setObjectName("FieldLabel")
@@ -471,6 +533,11 @@ class TranslatorQtWindow(QMainWindow):
         action_row.addWidget(self.start_button, 1)
         body.addLayout(action_row)
 
+        self.preview_button = QPushButton(t("button.preview"))
+        self.preview_button.setToolTip(t("tooltip.preview"))
+        self.preview_button.clicked.connect(self._open_preview)
+        body.addWidget(self.preview_button)
+
         run_row = QHBoxLayout()
         run_row.setSpacing(7)
         self.pause_button = QPushButton(t("button.pause"))
@@ -485,7 +552,13 @@ class TranslatorQtWindow(QMainWindow):
         run_row.addWidget(self.stop_button, 1)
         body.addLayout(run_row)
 
-        for button in (self.analyze_button, self.start_button, self.pause_button, self.stop_button):
+        for button in (
+            self.analyze_button,
+            self.start_button,
+            self.preview_button,
+            self.pause_button,
+            self.stop_button,
+        ):
             button.setFixedHeight(40)
             button.setMinimumWidth(0)
             button.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
@@ -502,6 +575,7 @@ class TranslatorQtWindow(QMainWindow):
         layout.setSpacing(12)
         layout.addWidget(self._build_status_card())
         layout.addWidget(self._build_task_card())
+        layout.addWidget(self._build_analysis_card())
         layout.addWidget(self._build_log_card(), 1)
         return content
 
@@ -603,7 +677,7 @@ class TranslatorQtWindow(QMainWindow):
         save.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_DialogSaveButton))
         clear.setToolTip(t("button.clear"))
         save.setToolTip(t("button.export_log"))
-        clear.clicked.connect(self._clear_log)
+        clear.clicked.connect(self._confirm_clear_log)
         save.clicked.connect(self._save_log)
 
         toolbar.addWidget(self.log_filter, 0, 0)
@@ -629,6 +703,24 @@ class TranslatorQtWindow(QMainWindow):
         self.log_view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.log_view.document().setMaximumBlockCount(MAX_LOG_BLOCKS)
         card.body.addWidget(self.log_view, 1)
+        return card
+
+    def _build_analysis_card(self) -> QWidget:
+        card = Card(t("card.analysis_selection"))
+        self.analysis_card = card
+
+        row = QHBoxLayout()
+        self.analysis_summary = QLabel(t("analysis.not_ready"))
+        self.analysis_summary.setObjectName("SelectionSummary")
+        self.analysis_configure_button = QPushButton(t("analysis.configure"))
+        self.analysis_configure_button.clicked.connect(self._open_analysis_selection)
+        row.addWidget(self.analysis_summary, 1)
+        row.addWidget(self.analysis_configure_button)
+        card.body.addLayout(row)
+
+        self._analysis_items = {}
+        self._analysis_selected = set()
+        card.hide()
         return card
 
     def resizeEvent(self, event) -> None:
@@ -678,16 +770,48 @@ class TranslatorQtWindow(QMainWindow):
 
     def _restore_state_from_config(self) -> None:
         self.folder_edit.setText(settings.get("GENERAL", "mc_dir"))
-        if "1.20.1" in MC_VERSIONS:
-            self.version_combo.setCurrentText("1.20.1")
-        self.language_combo.setCurrentText("Русский")
+        version = settings.get("GENERAL", "minecraft_version")
+        if version not in MC_VERSIONS:
+            version = "1.20.1" if "1.20.1" in MC_VERSIONS else MC_VERSIONS[0]
+        self.version_combo.setCurrentText(version)
+
+        language = settings.get("GENERAL", "target_language")
+        if language not in LANGUAGES:
+            language = "Русский"
+        self.language_combo.setCurrentText(language)
+
+        stored_engine = settings.get("GENERAL", "translation_engine")
         provider = settings.get("AI", "ai_provider") or "local"
-        if provider == "openrouter":
-            self.engine_combo.setCurrentText("OpenRouter")
-        else:
-            self.engine_combo.setCurrentText("Google")
+        if stored_engine == "Google" and provider in {
+            "lmstudio",
+            "ollama",
+            "llama",
+            "openrouter",
+        }:
+            stored_engine = {
+                "lmstudio": "LM Studio",
+                "ollama": "Ollama",
+                "llama": "Llama",
+                "openrouter": "OpenRouter",
+            }[provider]
+        engine_specs = {
+            "Google": ("google", "local"),
+            "DeepL": ("deepl", "local"),
+            "Local AI": ("ai", "local"),
+            "LM Studio": ("ai", "lmstudio"),
+            "Ollama": ("ai", "ollama"),
+            "Llama": ("ai", "llama"),
+            "OpenRouter": ("ai", "openrouter"),
+        }
+        wanted_spec = engine_specs.get(stored_engine, ("google", "local"))
+        for index in range(self.engine_combo.count()):
+            label = self.engine_combo.itemText(index)
+            if ENGINE_OPTIONS.get(label) == wanted_spec:
+                self.engine_combo.setCurrentIndex(index)
+                break
         self.ai_fallback.setChecked(settings.getboolean("AI", "fallback_google"))
         self._engine_changed(self.engine_combo.currentText())
+        self._cache_recovery_changed()
 
     def _select_folder(self) -> None:
         path = QFileDialog.getExistingDirectory(self, t("dialog.minecraft_folder"), settings.get("GENERAL", "mc_dir"))
@@ -713,10 +837,53 @@ class TranslatorQtWindow(QMainWindow):
         self.folder_state.style().polish(self.folder_state)
 
     def _engine_changed(self, label: str) -> None:
-        engine, _provider = ENGINE_OPTIONS[label]
+        engine, provider = ENGINE_OPTIONS[label]
+        stored_names = {
+            ("google", "local"): "Google",
+            ("deepl", "local"): "DeepL",
+            ("ai", "local"): "Local AI",
+            ("ai", "lmstudio"): "LM Studio",
+            ("ai", "ollama"): "Ollama",
+            ("ai", "llama"): "Llama",
+            ("ai", "openrouter"): "OpenRouter",
+        }
+        settings.set(
+            "GENERAL",
+            "translation_engine",
+            stored_names.get((engine, provider), "Google"),
+        )
         self.google_options.setVisible(engine == "google")
         self.ai_options.setVisible(engine == "ai")
         self._refresh_engine_state()
+        self._refresh_system_readiness()
+
+    def _cache_recovery_changed(self, *_args) -> None:
+        enabled = self.cache_recovery_checkbox.isChecked()
+        settings.set("GENERAL", "cache_recovery_mode", enabled)
+
+        if enabled:
+            if self._fallback_before_cache_recovery is None:
+                self._fallback_before_cache_recovery = self.ai_fallback.isChecked()
+            current_spec = ENGINE_OPTIONS.get(self.engine_combo.currentText())
+            if current_spec not in {
+                ("ai", "local"),
+                ("ai", "lmstudio"),
+                ("ai", "ollama"),
+                ("ai", "llama"),
+            }:
+                for index in range(self.engine_combo.count()):
+                    label = self.engine_combo.itemText(index)
+                    if ENGINE_OPTIONS.get(label) == ("ai", "local"):
+                        self.engine_combo.setCurrentIndex(index)
+                        break
+            self.ai_fallback.setChecked(True)
+        elif self._fallback_before_cache_recovery is not None:
+            self.ai_fallback.setChecked(self._fallback_before_cache_recovery)
+            self._fallback_before_cache_recovery = None
+
+        for button in self.mode_buttons.values():
+            button.setEnabled(not self._ui_locked and not enabled)
+        self.ai_fallback.setEnabled(not self._ui_locked and not enabled)
         self._refresh_system_readiness()
 
     def _refresh_engine_state(self) -> None:
@@ -815,13 +982,60 @@ class TranslatorQtWindow(QMainWindow):
         )
         dialog.exec()
 
+    def _open_preview(self) -> None:
+        if self._worker and self._worker.is_alive():
+            return
+        mc_dir = settings.get("GENERAL", "mc_dir").strip()
+        if not mc_dir or not Path(mc_dir).is_dir():
+            QMessageBox.warning(
+                self,
+                t("dialog.minecraft_folder"),
+                t("dialog.folder_first"),
+            )
+            return
+        self.preview_button.setEnabled(False)
+        self.preview_header_button.setEnabled(False)
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        report = None
+        error = None
+        try:
+            language = LANGUAGES.get(self.language_combo.currentText(), {})
+            target_regex = language.get("regex", r"[А-Яа-яЁё]")
+            target_code = language.get("file", "ru_ru")
+            report = build_preview_from_directory(
+                mc_dir,
+                target_locale=target_code,
+                target_regex=target_regex,
+            )
+        except Exception as exc:
+            error = exc
+        finally:
+            # The preview dialog has its own event loop.  Keeping the global
+            # wait cursor active until that dialog closes makes the UI look
+            # permanently busy and hides the fact that the graph is usable.
+            if QApplication.overrideCursor() is not None:
+                QApplication.restoreOverrideCursor()
+        try:
+            if error is not None:
+                QMessageBox.critical(self, t("error.title"), str(error))
+            elif report is not None:
+                PreviewDialog(report, self, self._retranslate_preview).exec()
+        finally:
+            self.preview_button.setEnabled(True)
+            self.preview_header_button.setEnabled(True)
+
     def _mode_value(self) -> str:
         for value, button in self.mode_buttons.items():
             if button.isChecked():
                 return value
         return "append"
 
-    def _translation_options(self) -> TranslationOptions:
+    def _translation_options(
+        self,
+        *,
+        preview_units: dict[str, frozenset[str]] | None = None,
+        retranslate_selected: bool = False,
+    ) -> TranslationOptions:
         engine, provider = ENGINE_OPTIONS[self.engine_combo.currentText()]
         return TranslationOptions(
             mc_dir=settings.get("GENERAL", "mc_dir"),
@@ -838,7 +1052,44 @@ class TranslatorQtWindow(QMainWindow):
             translate_mods=self.scope_mods.isChecked(),
             translate_books=self.scope_books.isChecked(),
             translate_quests=self.scope_quests.isChecked(),
+            selected_items=(
+                self._selected_analysis_items()
+                if self._analysis_ready
+                else None
+            ),
+            cache_recovery_mode=self.cache_recovery_checkbox.isChecked(),
+            preview_units=preview_units,
+            retranslate_selected=retranslate_selected,
         )
+
+    def _retranslate_preview(
+        self,
+        selected_units: dict[str, frozenset[str]],
+    ) -> bool:
+        """Run the normal safe pipeline for only checked preview units."""
+        if self._worker and self._worker.is_alive():
+            QMessageBox.warning(self, t("preview.title"), t("status.busy"))
+            return False
+        if not selected_units:
+            return False
+        options = self._translation_options(
+            preview_units=selected_units,
+            retranslate_selected=True,
+        )
+        options = replace(
+            options,
+            # Preview rows can come from any supported format, independent of
+            # the three scope checkboxes on the main dashboard.
+            translate_mods=True,
+            translate_books=True,
+            translate_quests=True,
+            selected_items=None,
+            process_mode="append",
+            output_mode="resourcepack",
+            pack_name=(self.pack_name.text().strip() or "MineAI_Pack") + "_PreviewRepair",
+        )
+        self._start_worker("preview_repair", options=options)
+        return True
 
     def _validate_preflight(self, *, translation: bool) -> bool:
         mc_dir = settings.get("GENERAL", "mc_dir").strip()
@@ -850,6 +1101,17 @@ class TranslatorQtWindow(QMainWindow):
             return False
         if not any((self.scope_mods.isChecked(), self.scope_books.isChecked(), self.scope_quests.isChecked())):
             QMessageBox.warning(self, t("dialog.nothing"), t("dialog.nothing_text"))
+            return False
+        if (
+            translation
+            and self._analysis_ready
+            and not self._selected_analysis_items()
+        ):
+            QMessageBox.warning(
+                self,
+                t("dialog.nothing"),
+                t("dialog.analysis_nothing_text"),
+            )
             return False
         if translation:
             ready, status_text = engine_readiness(settings, self.engine_combo.currentText())
@@ -877,11 +1139,13 @@ class TranslatorQtWindow(QMainWindow):
             on_log=lambda message, tag="white": self.signals.log.emit(message, tag),
             on_status=lambda text, progress: self.signals.status.emit(text, progress),
             on_row=lambda icon, name, kind, trans_c, en_c, pct: self.signals.row.emit(icon, name, kind, trans_c, en_c, pct),
+            on_analysis_item=lambda item: self.signals.analysis_item.emit(item),
         )
 
     def _start_analysis(self) -> None:
         if not self._validate_preflight(translation=False):
             return
+        self._clear_analysis_items()
         self._start_worker("analysis")
 
     def _start_translation(self) -> None:
@@ -895,14 +1159,14 @@ class TranslatorQtWindow(QMainWindow):
             })
         self._start_worker("translation")
 
-    def _start_worker(self, kind: str) -> None:
+    def _start_worker(self, kind: str, *, options: TranslationOptions | None = None) -> None:
         if self._worker and self._worker.is_alive():
             return
         self.job_state.start()
         self._runtime_ended_at = None
         self._clear_log()
         self._job = self._new_job()
-        options = self._translation_options()
+        options = options or self._translation_options()
         self._lock_ui(True)
         self.footer_status.setText(t("footer.running"))
         self.task_title.setText(t("status.analysis") if kind == "analysis" else t("status.translation_prepare"))
@@ -925,11 +1189,15 @@ class TranslatorQtWindow(QMainWindow):
         self._worker.start()
 
     def _worker_failed(self, kind: str, error: str) -> None:
+        if kind == "analysis":
+            self._analysis_ready = False
         label = t("status.error_analysis") if kind == "analysis" else t("status.error_translation")
         self._append_log(f"{label}:\n{error}", "red")
         self._set_status(label, None)
 
-    def _worker_finished(self, _kind: str) -> None:
+    def _worker_finished(self, kind: str) -> None:
+        if kind == "analysis":
+            self._analysis_ready = bool(self._analysis_items)
         if self._runtime_ended_at is None and self.job_state.snapshot().start_time:
             self._runtime_ended_at = time.time()
         self._job = None
@@ -963,10 +1231,12 @@ class TranslatorQtWindow(QMainWindow):
         self._set_status(t("status.stopping"), None)
 
     def _lock_ui(self, locked: bool) -> None:
+        self._ui_locked = locked
         for widget in (
             self.settings_button,
             self.prompts_button,
             self.migration_button,
+            self.preview_header_button,
             self.interface_language,
             self.folder_button,
             self.version_combo,
@@ -977,19 +1247,26 @@ class TranslatorQtWindow(QMainWindow):
             self.scope_quests,
             self.analyze_button,
             self.start_button,
+            self.preview_button,
             self.output_rp,
             self.output_inplace,
+            self.analysis_configure_button,
+            self.cache_recovery_checkbox,
         ):
             widget.setEnabled(not locked)
         for button in self.mode_buttons.values():
-            button.setEnabled(not locked)
+            button.setEnabled(
+                not locked and not self.cache_recovery_checkbox.isChecked()
+            )
         self.pause_button.setEnabled(locked)
         self.stop_button.setEnabled(locked)
         self.pack_name.setEnabled((not locked) and self.output_rp.isChecked())
         self.google_mode_combo.setEnabled(not locked)
         self.ai_mode_combo.setEnabled(not locked)
         self.ai_batch_spin.setEnabled(not locked)
-        self.ai_fallback.setEnabled(not locked)
+        self.ai_fallback.setEnabled(
+            not locked and not self.cache_recovery_checkbox.isChecked()
+        )
         if not locked:
             self.pause_button.setText(t("button.pause"))
 
@@ -1085,13 +1362,66 @@ class TranslatorQtWindow(QMainWindow):
         )
         self._push_log_entry(entry, persist=True)
 
+    def _append_analysis_item(self, analysis_item) -> None:
+        if analysis_item.key not in self._analysis_items and not analysis_item.is_group:
+            self._analysis_selected.add(analysis_item.key)
+        self._analysis_items[analysis_item.key] = analysis_item
+        self._refresh_analysis_summary()
+        self.analysis_card.show()
+
+    def _selected_analysis_items(self) -> frozenset[str]:
+        return frozenset(self._analysis_selected)
+
+    def _set_all_analysis_items(self, checked: bool) -> None:
+        self._analysis_selected = {
+            key
+            for key, item in self._analysis_items.items()
+            if checked and not item.is_group
+        }
+        self._refresh_analysis_summary()
+
+    def _open_analysis_selection(self) -> None:
+        if not self._analysis_items or self._worker and self._worker.is_alive():
+            return
+        dialog = AnalysisSelectionDialog(
+            self._analysis_items.values(),
+            self._analysis_selected,
+            self,
+        )
+        if dialog.exec():
+            self._analysis_selected = set(dialog.selected_keys())
+            self._refresh_analysis_summary()
+
+    def _refresh_analysis_summary(self) -> None:
+        if not hasattr(self, "analysis_summary"):
+            return
+        total = sum(not item.is_group for item in self._analysis_items.values())
+        selected = len(self._analysis_selected)
+        self.analysis_summary.setText(
+            t("analysis.selected_summary", selected=selected, total=total)
+            if total
+            else t("analysis.not_ready")
+        )
+        busy = bool(self._worker and self._worker.is_alive())
+        self.analysis_configure_button.setEnabled(bool(total) and not busy)
+
+    def _clear_analysis_items(self) -> None:
+        self._analysis_items.clear()
+        self._analysis_selected.clear()
+        self._analysis_ready = False
+        self._refresh_analysis_summary()
+        if hasattr(self, "analysis_card"):
+            self.analysis_card.hide()
+
     def _push_log_entry(self, entry: LogEntry, *, persist: bool) -> None:
         self._log_entries.append(entry)
         if len(self._log_entries) > MAX_LOG_ENTRIES:
             del self._log_entries[: len(self._log_entries) - MAX_LOG_ENTRIES]
         if persist and self._log_file is not None:
             try:
-                self._log_file.write(entry.plain_text + "\n")
+                self._log_file.write(
+                    format_persisted_log_line(entry, datetime.now()) + "\n"
+                )
             except OSError:
                 pass
         if hasattr(self, "log_filter") and self._log_entry_visible(entry):
@@ -1105,21 +1435,26 @@ class TranslatorQtWindow(QMainWindow):
     def _display_segments_for_entry(self, entry: LogEntry) -> tuple[LogSegment, ...]:
         """Return a compact pixel-aware preview without mutating the raw log entry."""
         if (
-            entry.category != "translated"
-            or not hasattr(self, "log_full_lines")
+            not hasattr(self, "log_full_lines")
             or self.log_full_lines.isChecked()
             or len(entry.segments) != 1
         ):
             return entry.segments
 
         parts = split_translation_message(entry.plain_text)
-        if parts is None:
-            return entry.segments
-
         metrics = self.log_view.fontMetrics()
         available = max(320, self.log_view.viewport().width() - 24)
         if metrics.horizontalAdvance(entry.plain_text) <= available:
             return entry.segments
+
+        if parts is None:
+            compact = entry.plain_text.replace("\r\n", " ↩ ").replace("\n", " ↩ ")
+            preview = metrics.elidedText(
+                compact,
+                Qt.TextElideMode.ElideRight,
+                available,
+            )
+            return (LogSegment(preview, entry.segments[0].color),)
 
         separator_width = metrics.horizontalAdvance(parts.separator + parts.suffix)
         content_width = max(160, available - separator_width)
@@ -1175,6 +1510,19 @@ class TranslatorQtWindow(QMainWindow):
         self._log_entries.clear()
         self.log_view.clear()
 
+    def _confirm_clear_log(self) -> None:
+        if not self._log_entries:
+            return
+        answer = QMessageBox.question(
+            self,
+            t("log.clear_title"),
+            t("log.clear_confirmation"),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            self._clear_log()
+
     def _save_log(self) -> None:
         path, _ = QFileDialog.getSaveFileName(self, t("button.export_log"), "mineai_log_export.txt", "Text files (*.txt);;All files (*)")
         if not path:
@@ -1189,6 +1537,9 @@ class TranslatorQtWindow(QMainWindow):
         root = Path(path)
         if not root.is_dir():
             return
+        previous = settings.get("GENERAL", "mc_dir").strip()
+        if previous and Path(previous) != root:
+            self._clear_analysis_items()
         settings.set("GENERAL", "mc_dir", str(root))
         self.folder_edit.setText(str(root))
         self._refresh_folder_state()
@@ -1214,10 +1565,19 @@ class TranslatorQtWindow(QMainWindow):
             "ai_mode": self.ai_mode_combo.currentData(),
             "ai_batch": self.ai_batch_spin.value(),
             "fallback": self.ai_fallback.isChecked(),
+            "cache_recovery": self.cache_recovery_checkbox.isChecked(),
             "scope": (self.scope_mods.isChecked(), self.scope_books.isChecked(), self.scope_quests.isChecked()),
             "mode": self._mode_value(),
             "resourcepack": self.output_rp.isChecked(),
             "pack_name": self.pack_name.text(),
+            "analysis_ready": self._analysis_ready,
+            "analysis_items": [
+                (
+                    analysis_item,
+                    key in self._analysis_selected,
+                )
+                for key, analysis_item in self._analysis_items.items()
+            ],
         }
 
     def _rebuild_ui_for_locale(self) -> None:
@@ -1249,12 +1609,24 @@ class TranslatorQtWindow(QMainWindow):
             self.ai_mode_combo.setCurrentIndex(ai_index)
         self.ai_batch_spin.setValue(int(state["ai_batch"]))
         self.ai_fallback.setChecked(bool(state["fallback"]))
+        self.cache_recovery_checkbox.setChecked(bool(state["cache_recovery"]))
+        self._cache_recovery_changed()
         for checkbox, checked in zip((self.scope_mods, self.scope_books, self.scope_quests), state["scope"]):
             checkbox.setChecked(bool(checked))
         self.mode_buttons[str(state["mode"])].setChecked(True)
         self.output_rp.setChecked(bool(state["resourcepack"]))
         self.output_inplace.setChecked(not bool(state["resourcepack"]))
         self.pack_name.setText(str(state["pack_name"]))
+        restored_selected = set()
+        for analysis_item, checked in state["analysis_items"]:
+            if analysis_item is None:
+                continue
+            self._append_analysis_item(analysis_item)
+            if checked:
+                restored_selected.add(analysis_item.key)
+        self._analysis_selected = restored_selected
+        self._refresh_analysis_summary()
+        self._analysis_ready = bool(state["analysis_ready"])
         self._refresh_folder_state()
         self._refresh_engine_state()
         self._refresh_system_readiness()

@@ -1,4 +1,4 @@
-"""Pure helpers for the Qt presentation layer.
+﻿"""Pure helpers for the Qt presentation layer.
 
 This module deliberately imports no Qt symbols so it can be unit-tested in the
 existing test suite even when the optional Qt dependency is not installed.
@@ -34,6 +34,9 @@ ENGINE_OPTIONS = {
     "Локальный ИИ": ("ai", "local"),
     "Local AI": ("ai", "local"),
     "OpenRouter": ("ai", "openrouter"),
+    "LM Studio": ("ai", "lmstudio"),
+    "Ollama": ("ai", "ollama"),
+    "Llama": ("ai", "llama"),
 }
 
 
@@ -95,7 +98,9 @@ def stats_from_snapshot(snapshot, *, now: float | None = None, eta_text: str = "
     error_percent = (failed / denominator * 100.0) if denominator else 0.0
     current_time = time.time() if now is None else now
     if snapshot.start_time:
-        elapsed = max(0.0, current_time - snapshot.start_time)
+        elapsed = current_time - snapshot.start_time
+        elapsed -= max(0.0, float(getattr(snapshot, "paused_seconds", 0.0)))
+        elapsed = max(0.0, elapsed)
     else:
         elapsed = 0.0
     rate = processed / elapsed * 60.0 if elapsed > 0 and processed > 0 else 0.0
@@ -132,6 +137,27 @@ def engine_readiness(config, engine_label: str) -> tuple[bool, str]:
         if not model:
             return False, tr("ready.openrouter_model")
         return True, f"OpenRouter · {model}"
+    if engine == "ai" and provider == "lmstudio":
+        if not config.get("LMSTUDIO", "base_url").strip():
+            return False, tr("ready.lmstudio_url")
+        model = config.get("LMSTUDIO", "model").strip()
+        if not model:
+            return False, tr("ready.lmstudio_model")
+        return True, f"LM Studio · {model}"
+    if engine == "ai" and provider == "ollama":
+        if not config.get("OLLAMA", "base_url").strip():
+            return False, tr("ready.ollama_url")
+        model = config.get("OLLAMA", "model").strip()
+        if not model:
+            return False, tr("ready.ollama_model")
+        return True, f"Ollama · {model}"
+    if engine == "ai" and provider == "llama":
+        if not config.get("LLAMA", "base_url").strip():
+            return False, tr("ready.llama_url")
+        model = config.get("LLAMA", "model").strip()
+        if not model:
+            return False, tr("ready.llama_model")
+        return True, f"Llama · {model}"
     if engine == "ai":
         model_path = config.get("AI", "model_path").strip()
         if not model_path:

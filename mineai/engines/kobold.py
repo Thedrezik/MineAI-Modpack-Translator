@@ -1,4 +1,4 @@
-import requests
+﻿import requests
 
 from mineai.constants import KOBOLD_API
 from mineai.engines.http_retry import RequestCancelled, request_with_retry
@@ -6,7 +6,8 @@ from mineai.engines.llm_common import BatchLlmEngine
 
 
 class KoboldEngine(BatchLlmEngine):
-    def __init__(self, mode: str = "safe", context: str = "", prompt_type: str = "mods", retries: int = 3) -> None:
+    def __init__(self, mode: str = "safe", context: str = "", prompt_type: str = "mods", retries: int = 3, *, session=None) -> None:
+        self.session = session or requests.Session()
         self._should_continue = None
         self._on_log = None
         super().__init__(
@@ -33,7 +34,7 @@ class KoboldEngine(BatchLlmEngine):
         active_log = on_log or self._on_log
         try:
             response = request_with_retry(
-                lambda: requests.post(
+                lambda: self.session.post(
                     KOBOLD_API,
                     json={
                         "messages": [{"role": "user", "content": prompt}],

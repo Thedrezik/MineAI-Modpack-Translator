@@ -1,4 +1,4 @@
-"""Application lifecycle helpers kept separate from the GUI layout."""
+﻿"""Application lifecycle helpers kept separate from the GUI layout."""
 
 import ctypes
 import sys
