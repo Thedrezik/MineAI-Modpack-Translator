@@ -2,12 +2,6 @@
 /build/
 /dist/
 *.spec
-!MineAI_Translator_Beta36.spec
-!MineAI_Translator_Beta39.spec
-!MineAI_Translator_Beta41.spec
-!MineAI_Translator_Beta42.spec
-!MineAI_Translator_Beta43.spec
-!MineAI_Translator_Beta44.spec
 !MineAI_Translator_Beta45.spec
 
 # Временные каталоги и результаты инструментов

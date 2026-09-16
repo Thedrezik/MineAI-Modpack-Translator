@@ -1,9 +1,0 @@
-{
-  "processor": "com.hollingsworth.arsnouveau.client.patchouli.GlyphProcessor",
-  "components": [
-    {"type": "patchouli:custom", "recipe_name": "#recipe"},
-    {"type": "patchouli:text", "text": "#tier#"},
-    {"type": "patchouli:text", "text": "#mana_cost#"},
-    {"type": "patchouli:text", "text": "#schools#"}
-  ]
-}

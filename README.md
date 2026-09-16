@@ -1,7 +1,6 @@
 ﻿# 🌍 MineAI Translator (Minecraft Modpack Localizer)
 
 [![Beta45](https://img.shields.io/badge/version-10.0.0--BETAv45-7c3aed)](https://github.com/Evg-Yustus/MineAI-Modpack-Translator-TEST/releases/latest)
-[![Tests](https://github.com/Evg-Yustus/MineAI-Modpack-Translator-TEST/actions/workflows/tests.yml/badge.svg?branch=beta45)](https://github.com/Evg-Yustus/MineAI-Modpack-Translator-TEST/actions/workflows/tests.yml?query=branch%3Abeta45)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776ab?logo=python&logoColor=white)](https://www.python.org/)
 [![License review](https://img.shields.io/badge/FormatKit_license-review_required-orange.svg)](#license)
 
@@ -28,24 +27,11 @@ directory, choose the translation scope and provider, then start the run from
 the dashboard. The **In-game view** opens a read-only preview with the same
 semantic units used by the translator.
 
-### Main dashboard
-
-![Beta45 main dashboard](docs/screenshots/beta45-main.png)
-
-### Book preview
-
-![Beta45 book preview](docs/screenshots/beta45-book-preview.png)
-
-The book view supports registered formats (including Patchouli, Modonomicon,
-Immersive Engineering manuals, GuideME/Markdown and Oracle Index), chapter
-selection, multi-page navigation, Minecraft colour codes and an original/
-translation toggle.
-
-### Quest preview
-
-![Beta45 quest preview](docs/screenshots/beta45-quest-preview.png)
-
-The quest view shows readable quest titles and dependency cards. Zoom, graph
+The dashboard starts translation runs and reports progress. The book view
+supports registered formats (including Patchouli, Modonomicon, Immersive
+Engineering manuals, GuideME/Markdown and Oracle Index), chapter selection,
+multi-page navigation, Minecraft colour codes and an original/translation
+toggle. The quest view shows readable titles and dependency cards; zoom, graph
 selection and the unit list stay linked, while the problem report identifies
 untranslated or structurally damaged text without exposing internal IDs in the
 game-facing view.
@@ -248,8 +234,8 @@ The embedded architecture combines the standalone `mineai_formatkit` SDK.
 GuideME/Markdown, IE manuals, Patchouli, Modonomicon, Oracle Index and locale
 JSON preserve their source serialization while exposing only visible text nodes;
 locale-free books are discovered from their explicit guidebook trees as well.
-The upstream API and corpus notes are kept in
-[`docs/upstream-formatkit`](docs/upstream-formatkit).
+Historical API and corpus notes remain available in the Git history; the
+production branch keeps only runtime sources and build metadata.
 
 ---
 
@@ -384,8 +370,9 @@ Beta45 сохраняет семантический конвейер, ремо�
 объединяет смысловые блоки с отдельным SDK `mineai_formatkit`; Markdown/GuideME,
 IE, Patchouli, Modonomicon, Oracle Index и locale JSON проходят структурную
 проверку без передачи разметки переводчику, включая книги из явных деревьев
-guidebook вне JAR. API и результаты корпусного аудита находятся в
-[`docs/upstream-formatkit`](docs/upstream-formatkit).
+guidebook вне JAR. Исторические API-заметки и результаты корпусного аудита
+доступны в истории Git; в production-ветке оставлены только исходники и файлы
+сборки.
 
 ## License
 
